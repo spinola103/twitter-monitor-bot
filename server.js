@@ -25,26 +25,47 @@ app.post('/scrape', async (req, res) => {
   const SCROLL_DELAY = parseInt(process.env.SCROLL_DELAY) || 2000;
   const MAX_SCROLL_ATTEMPTS = parseInt(process.env.MAX_SCROLL_ATTEMPTS) || 5;
 
+  let browser;
   try {
-    const browser = await puppeteer.launch({
-      headless: 'new', // Headless mode for Railway
-      executablePath: '/usr/bin/chromium', // ✅ Use system Chromium
+    // Launch browser with optimized settings for Railway
+    browser = await puppeteer.launch({
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // Important for Railway's memory limits
         '--disable-gpu',
-        '--disable-features=VizDisplayCompositor',
-        '--window-size=1200,800'
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--window-size=1200,800',
+        '--memory-pressure-off'
       ],
-      defaultViewport: null
+      defaultViewport: { width: 1200, height: 800 }
     });
 
     const page = await browser.newPage();
+    
+    // Optimize page settings
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (resourceType === 'stylesheet' || resourceType === 'image' || resourceType === 'font') {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setExtraHTTPHeaders({ 
       'Accept-Language': 'en-US,en;q=0.9',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
 
     // Load cookies from environment variable
@@ -63,10 +84,21 @@ app.post('/scrape', async (req, res) => {
     console.log('🌐 Navigating to:', searchURL);
     await page.goto(searchURL, { 
       waitUntil: 'domcontentloaded',
-      timeout: 60000 
+      timeout: 30000 // Reduced timeout
     });
 
-    await page.waitForSelector('article', { timeout: 15000 });
+    // Wait for tweets to load
+    try {
+      await page.waitForSelector('article', { timeout: 15000 });
+    } catch (e) {
+      console.log('No articles found, checking for login requirement...');
+      const loginRequired = await page.$('div[data-testid="login-prompt"]') || 
+                            await page.$('a[href="/login"]');
+      if (loginRequired) {
+        throw new Error('Twitter login required - please provide valid cookies');
+      }
+      throw new Error('No tweets found on this page');
+    }
 
     // Scroll to load more tweets
     let scrollAttempts = 0;
@@ -76,47 +108,61 @@ app.post('/scrape', async (req, res) => {
       const currentCount = await page.$$eval('article', articles => articles.length);
       
       if (currentCount === tweetCount && tweetCount > 0) {
+        console.log(`📍 No new tweets loaded, stopping at ${tweetCount} tweets`);
         break;
       }
       
       tweetCount = currentCount;
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+      console.log(`📜 Scroll ${scrollAttempts + 1}: Found ${tweetCount} tweets`);
+      
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
       await new Promise(resolve => setTimeout(resolve, SCROLL_DELAY));
       scrollAttempts++;
     }
 
-    console.log(`✅ Loaded ${tweetCount} tweets`);
+    console.log(`✅ Final tweet count: ${tweetCount}`);
 
     const tweets = await page.evaluate(() => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       
-      articles.forEach(article => {
+      articles.forEach((article, index) => {
         try {
           const textElement = article.querySelector('[data-testid="tweetText"]');
-          const text = textElement ? textElement.innerText : '';
+          const text = textElement ? textElement.innerText.trim() : '';
           
           const linkElement = article.querySelector('a[href*="/status/"]');
           const link = linkElement ? 'https://twitter.com' + linkElement.getAttribute('href') : '';
           
+          // Better like extraction
           const likeElement = article.querySelector('[data-testid="like"]');
-          const likesText = likeElement ? likeElement.getAttribute('aria-label').match(/\d+/g) : null;
-          const likes = likesText ? parseInt(likesText[0], 10) : 0;
+          let likes = 0;
+          if (likeElement) {
+            const ariaLabel = likeElement.getAttribute('aria-label') || '';
+            const likeMatch = ariaLabel.match(/(\d+)/);
+            likes = likeMatch ? parseInt(likeMatch[1], 10) : 0;
+          }
           
-          const verified = !!article.querySelector('[data-testid="icon-verified"]');
+          const verified = !!article.querySelector('[data-testid="icon-verified"]') || 
+                          !!article.querySelector('svg[aria-label="Verified account"]');
           
+          // Better username extraction
           const userElement = article.querySelector('[data-testid="User-Name"]');
-          const username = userElement ? userElement.innerText.split('\n')[0] : '';
+          let username = '';
+          if (userElement) {
+            const userText = userElement.innerText.split('\n');
+            username = userText[0] || '';
+          }
 
           const tweetId = link.match(/status\/(\d+)/)?.[1] || '';
           
           const timeElement = article.querySelector('time');
           const timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
           
-          if (text && link) {
+          if (text && link && tweetId) {
             tweetData.push({
               id: tweetId,
-              username,
+              username: username.replace(/^@/, ''), // Remove @ if present
               text,
               link,
               likes,
@@ -126,14 +172,14 @@ app.post('/scrape', async (req, res) => {
             });
           }
         } catch (e) {
-          console.error('Error processing tweet:', e);
+          console.error(`Error processing tweet ${index}:`, e.message);
         }
       });
       
       return tweetData;
     });
 
-    await browser.close();
+    console.log(`🎯 Successfully extracted ${tweets.length} tweets`);
     
     res.json({
       success: true,
@@ -149,9 +195,29 @@ app.post('/scrape', async (req, res) => {
       error: error.message,
       timestamp: new Date().toISOString() 
     });
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('Error closing browser:', e.message);
+      }
+    }
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
+  console.log(`📊 Memory usage:`, process.memoryUsage());
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully');
+  process.exit(0);
 });
