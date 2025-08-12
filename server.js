@@ -1,6 +1,7 @@
 const express = require('express');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const fs = require('fs');
 
 puppeteer.use(StealthPlugin());
 
@@ -9,9 +10,35 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// Function to find Chrome executable
+function findChrome() {
+  const possiblePaths = [
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    process.env.PUPPETEER_EXECUTABLE_PATH
+  ].filter(Boolean);
+
+  for (const path of possiblePaths) {
+    if (fs.existsSync(path)) {
+      console.log(`✅ Found Chrome at: ${path}`);
+      return path;
+    }
+  }
+  
+  console.log('⚠️ No Chrome executable found, using default');
+  return null;
+}
+
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ status: 'Twitter Scraper API Ready', timestamp: new Date().toISOString() });
+  const chromePath = findChrome();
+  res.json({ 
+    status: 'Twitter Scraper API Ready', 
+    chrome: chromePath || 'default',
+    timestamp: new Date().toISOString() 
+  });
 });
 
 // Main scraping endpoint
@@ -27,8 +54,10 @@ app.post('/scrape', async (req, res) => {
 
   let browser;
   try {
+    const chromePath = findChrome();
+    
     // Launch browser with optimized settings for Railway
-    browser = await puppeteer.launch({
+    const launchOptions = {
       headless: 'new',
       args: [
         '--no-sandbox',
@@ -48,7 +77,14 @@ app.post('/scrape', async (req, res) => {
         '--memory-pressure-off'
       ],
       defaultViewport: { width: 1200, height: 800 }
-    });
+    };
+
+    // Add executablePath only if we found Chrome
+    if (chromePath) {
+      launchOptions.executablePath = chromePath;
+    }
+
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     
@@ -93,7 +129,8 @@ app.post('/scrape', async (req, res) => {
     } catch (e) {
       console.log('No articles found, checking for login requirement...');
       const loginRequired = await page.$('div[data-testid="login-prompt"]') || 
-                            await page.$('a[href="/login"]');
+                            await page.$('a[href="/login"]') ||
+                            await page.$('a[href="/i/flow/login"]');
       if (loginRequired) {
         throw new Error('Twitter login required - please provide valid cookies');
       }
@@ -209,6 +246,7 @@ app.post('/scrape', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
   console.log(`📊 Memory usage:`, process.memoryUsage());
+  console.log(`🔍 Chrome executable:`, findChrome() || 'default');
 });
 
 // Graceful shutdown
