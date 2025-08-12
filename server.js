@@ -54,43 +54,27 @@ app.post('/scrape', async (req, res) => {
   try {
     const chromePath = findChrome();
     
-    // SUPER AGGRESSIVE launch options to avoid cache
+    // Less aggressive launch options - Twitter is blocking too aggressive settings
     const launchOptions = {
       headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-renderer-backgrounding',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-client-side-phishing-detection',
-        '--disable-default-apps',
-        '--disable-dev-shm-usage',
-        '--disable-extensions',
-        '--disable-features=TranslateUI',
-        '--disable-hang-monitor',
-        '--disable-ipc-flooding-protection',
-        '--disable-popup-blocking',
-        '--disable-prompt-on-repost',
-        '--disable-sync',
-        '--metrics-recording-only',
+        '--disable-accelerated-2d-canvas',
         '--no-first-run',
-        '--safebrowsing-disable-auto-update',
-        '--enable-automation',
-        '--password-store=basic',
-        '--use-mock-keychain',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-cache',              // 🔥 DISABLE CACHE
-        '--aggressive-cache-discard',   // 🔥 AGGRESSIVE CACHE DISCARD  
-        '--disk-cache-size=0',          // 🔥 NO DISK CACHE
-        '--media-cache-size=0',         // 🔥 NO MEDIA CACHE
-        '--incognito',                  // 🔥 PRIVATE MODE
+        '--no-zygote',
         '--single-process',
-        '--window-size=1200,800'
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--window-size=1200,800',
+        '--memory-pressure-off',
+        '--disable-blink-features=AutomationControlled', // Hide automation
+        '--user-data-dir=/tmp/chrome-user-data-' + Date.now() // Fresh profile each time
       ],
       defaultViewport: { width: 1200, height: 800 }
     };
@@ -145,30 +129,22 @@ app.post('/scrape', async (req, res) => {
       'User-Agent': `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36-${timestamp}`
     });
 
-    // 🔥 AGGRESSIVE REQUEST INTERCEPTION
+    // 🔥 LESS AGGRESSIVE REQUEST INTERCEPTION
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
-      const url = req.url();
       
       if (resourceType === 'stylesheet' || resourceType === 'image' || resourceType === 'font') {
         req.abort();
       } else {
-        // Add cache-busting parameters to ALL requests
-        const separator = url.includes('?') ? '&' : '?';
-        const cacheBustUrl = url + separator + '_t=' + Date.now() + '&_r=' + Math.random();
-        
+        // Simple cache busting without URL modification
         const headers = {
           ...req.headers(),
           'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
+          'Pragma': 'no-cache'
         };
         
-        req.continue({ 
-          url: cacheBustUrl,
-          headers 
-        });
+        req.continue({ headers });
       }
     });
 
@@ -185,70 +161,36 @@ app.post('/scrape', async (req, res) => {
       console.error('❌ Cookie loading failed:', err.message);
     }
 
-    // 🔥 CACHE-BUSTED URL
-    const separator = searchURL.includes('?') ? '&' : '?';
-    const freshURL = searchURL + separator + '_fresh=' + Date.now() + '&_cache_bust=' + Math.random();
+    // Use normal URL without cache busting to avoid detection
+    console.log('🌐 FRESH NAVIGATION to:', searchURL);
     
-    console.log('🌐 AGGRESSIVE FRESH NAVIGATION to:', freshURL);
-    
-    // Multiple navigation attempts for freshness
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        console.log(`📡 Navigation attempt ${attempt}/2`);
-        
-        await page.goto(freshURL, { 
-          waitUntil: ['networkidle0', 'domcontentloaded'],
-          timeout: 60000
-        });
-        
-        // Force a hard refresh
-        await page.keyboard.press('F5');
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        break; // Success, exit loop
-      } catch (navError) {
-        console.log(`⚠️ Navigation attempt ${attempt} failed:`, navError.message);
-        if (attempt === 2) throw navError; // Last attempt failed
-        
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
+    // Single navigation attempt with better settings
+    try {
+      await page.goto(searchURL, { 
+        waitUntil: 'domcontentloaded',
+        timeout: 45000
+      });
+      
+      console.log('✅ Navigation successful');
+      
+    } catch (navError) {
+      console.log(`⚠️ Navigation failed:`, navError.message);
+      throw navError;
     }
 
-    // Wait for fresh content with multiple strategies
-    console.log('⏳ Waiting for FRESH tweets to load...');
+    // Wait for tweets with simpler approach
+    console.log('⏳ Waiting for tweets to load...');
     
-    let tweetsFound = false;
-    const maxWaitAttempts = 5;
-    
-    for (let waitAttempt = 1; waitAttempt <= maxWaitAttempts; waitAttempt++) {
-      try {
-        console.log(`🔍 Wait attempt ${waitAttempt}/${maxWaitAttempts}`);
-        
-        await Promise.race([
-          page.waitForSelector('article[data-testid="tweet"]', { timeout: 10000 }),
-          page.waitForSelector('article', { timeout: 10000 }),
-          page.waitForSelector('[data-testid="tweetText"]', { timeout: 10000 })
-        ]);
-        
-        tweetsFound = true;
-        console.log('✅ FRESH tweets container found!');
-        break;
-        
-      } catch (waitError) {
-        console.log(`⏳ Wait attempt ${waitAttempt} failed, trying refresh...`);
-        
-        // Try different refresh strategies
-        if (waitAttempt <= 2) {
-          await page.reload({ waitUntil: 'networkidle0', timeout: 30000 });
-        } else if (waitAttempt <= 4) {
-          await page.evaluate(() => location.reload(true));
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
-    }
-    
-    if (!tweetsFound) {
+    try {
+      await page.waitForSelector('article', { timeout: 20000 });
+      console.log('✅ Tweet containers found!');
+      
+      // Wait a bit more for content to stabilize
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+    } catch (waitError) {
+      console.log(`⚠️ Tweet loading failed:`, waitError.message);
+      
       // Check for login wall
       const loginRequired = await page.$('div[data-testid="login-prompt"]') || 
                             await page.$('a[href="/login"]') ||
@@ -256,7 +198,7 @@ app.post('/scrape', async (req, res) => {
       if (loginRequired) {
         throw new Error('❌ Twitter login required - FRESH COOKIES NEEDED for latest tweets');
       }
-      throw new Error('❌ No tweets found - Twitter might be blocking requests');
+      throw new Error('❌ No tweets found - Twitter might be blocking requests or account is private');
     }
 
     // 🔥 FORCE SCROLL TO ABSOLUTE TOP FOR FRESHEST CONTENT
@@ -313,7 +255,7 @@ app.post('/scrape', async (req, res) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       const now = new Date();
-      const oneWeekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000)); // Only tweets from last week
+      const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000)); // Only tweets from last 30 days
       
       console.log(`🔍 Processing ${articles.length} articles for FRESH content...`);
       
@@ -355,8 +297,8 @@ app.post('/scrape', async (req, res) => {
           const tweetDate = new Date(timestamp);
           if (isNaN(tweetDate.getTime())) continue;
           
-          // 🔥 ONLY INCLUDE RECENT TWEETS (last week)
-          if (tweetDate < oneWeekAgo) {
+          // 🔥 ONLY INCLUDE RECENT TWEETS (last 30 days)
+          if (tweetDate < thirtyDaysAgo) {
             console.log(`⏰ Skipping old tweet: ${relativeTime} (${tweetDate.toISOString()})`);
             continue;
           }
@@ -431,7 +373,7 @@ app.post('/scrape', async (req, res) => {
             relativeTime,
             isRetweet,
             ageHours: Math.round(ageHours * 100) / 100,
-            freshness: ageHours < 1 ? 'very_fresh' : ageHours < 24 ? 'fresh' : 'recent',
+            freshness: ageHours < 1 ? 'very_fresh' : ageHours < 24 ? 'fresh' : ageHours < 168 ? 'recent' : 'older',
             scraped_at: new Date().toISOString()
           };
           
@@ -525,7 +467,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 FRESH Twitter Scraper API running on port ${PORT}`);
   console.log(`📊 Memory usage:`, process.memoryUsage());
   console.log(`🔍 Chrome executable:`, findChrome() || 'default');
-  console.log(`🔥 OPTIMIZED FOR FRESH TWEETS ONLY - Last 7 days`);
+  console.log(`🔥 OPTIMIZED FOR FRESH TWEETS ONLY - Last 30 days`);
 });
 
 process.on('SIGTERM', () => {
