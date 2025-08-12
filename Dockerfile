@@ -20,8 +20,10 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Clean npm cache and install dependencies
+RUN npm cache clean --force && \
+    npm install --omit=dev --production && \
+    npm cache clean --force
 
 # Copy source code
 COPY . .
