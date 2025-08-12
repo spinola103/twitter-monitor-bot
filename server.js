@@ -149,16 +149,24 @@ app.post('/scrape', async (req, res) => {
     });
 
     // Load cookies ONLY if provided
+    let cookiesLoaded = false;
     try {
       if (process.env.TWITTER_COOKIES) {
         const cookies = JSON.parse(process.env.TWITTER_COOKIES);
         if (Array.isArray(cookies) && cookies.length > 0) {
           await page.setCookie(...cookies);
-          console.log('🍪 Fresh cookies loaded');
+          cookiesLoaded = true;
+          console.log(`🍪 ${cookies.length} cookies loaded successfully`);
+        } else {
+          console.log('⚠️ TWITTER_COOKIES is not a valid array');
         }
+      } else {
+        console.log('⚠️ TWITTER_COOKIES environment variable not found');
+        console.log('💡 Twitter requires authentication - please set TWITTER_COOKIES');
       }
     } catch (err) {
       console.error('❌ Cookie loading failed:', err.message);
+      console.log('💡 Check your TWITTER_COOKIES format');
     }
 
     // Use normal URL without cache busting to avoid detection
@@ -196,9 +204,9 @@ app.post('/scrape', async (req, res) => {
                             await page.$('a[href="/login"]') ||
                             await page.$('a[href="/i/flow/login"]');
       if (loginRequired) {
-        throw new Error('❌ Twitter login required - FRESH COOKIES NEEDED for latest tweets');
+        throw new Error(`❌ Twitter login required - Please set TWITTER_COOKIES environment variable. Cookies loaded: ${cookiesLoaded}`);
       }
-      throw new Error('❌ No tweets found - Twitter might be blocking requests or account is private');
+      throw new Error(`❌ No tweets found - Twitter might be blocking requests or account is private. Cookies loaded: ${cookiesLoaded}`);
     }
 
     // 🔥 FORCE SCROLL TO ABSOLUTE TOP FOR FRESHEST CONTENT
