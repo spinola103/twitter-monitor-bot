@@ -89,14 +89,19 @@ app.post('/scrape', async (req, res) => {
 
     const page = await browser.newPage();
     
-    // Optimize page settings
+    // Optimize page settings and disable caching
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
       if (resourceType === 'stylesheet' || resourceType === 'image' || resourceType === 'font') {
         req.abort();
       } else {
-        req.continue();
+        // Disable cache for dynamic content
+        const headers = req.headers();
+        headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+        headers['Pragma'] = 'no-cache';
+        headers['Expires'] = '0';
+        req.continue({ headers });
       }
     });
 
@@ -119,14 +124,33 @@ app.post('/scrape', async (req, res) => {
     }
 
     console.log('🌐 Navigating to:', searchURL);
+    
+    // Clear cache to ensure fresh content
+    await page.evaluate(() => {
+      if ('caches' in window) {
+        caches.keys().then(names => {
+          names.forEach(name => caches.delete(name));
+        });
+      }
+    });
+    
+    // Navigate with network idle wait to ensure full loading
     await page.goto(searchURL, { 
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
+      waitUntil: 'networkidle2',
+      timeout: 45000
     });
 
-    // Wait for tweets to load
+    // Wait a bit more for dynamic content
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Wait for tweets to load with multiple selectors
     try {
-      await page.waitForSelector('article', { timeout: 15000 });
+      await Promise.race([
+        page.waitForSelector('article', { timeout: 20000 }),
+        page.waitForSelector('[data-testid="tweet"]', { timeout: 20000 }),
+        page.waitForSelector('[data-testid="tweetText"]', { timeout: 20000 })
+      ]);
+      console.log('✅ Tweets container found');
     } catch (e) {
       console.log('No articles found, checking for login requirement...');
       const loginRequired = await page.$('div[data-testid="login-prompt"]') || 
@@ -137,33 +161,71 @@ app.post('/scrape', async (req, res) => {
       }
       throw new Error('No tweets found on this page');
     }
+    
+    // Additional wait for content to stabilize
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Modified scrolling logic to get top 10 recent tweets
+    // Enhanced scrolling logic to get most recent tweets
     let scrollAttempts = 0;
     let tweetCount = 0;
-    const targetTweets = maxTweets + 5; // Get a few extra to ensure we have enough valid tweets
+    let lastTweetCount = 0;
+    let stableCount = 0;
+    const targetTweets = maxTweets + 10; // Get more tweets to ensure we have recent ones
+    const MAX_STABLE_ATTEMPTS = 2; // Stop if count is stable for 2 attempts
     
     console.log(`🎯 Target: ${maxTweets} most recent tweets`);
     
-    while (scrollAttempts < MAX_SCROLL_ATTEMPTS && tweetCount < targetTweets) {
-      const currentCount = await page.$$eval('article', articles => articles.length);
+    // First, try to scroll to the very top to ensure we get latest content
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+    });
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Force refresh of timeline by scrolling down a bit and back up
+    await page.evaluate(() => {
+      window.scrollBy(0, 200);
+    });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+    });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    while (scrollAttempts < MAX_SCROLL_ATTEMPTS && tweetCount < targetTweets && stableCount < MAX_STABLE_ATTEMPTS) {
+      // Count current tweets
+      const currentCount = await page.$eval('article', articles => articles.length);
       
-      if (currentCount === tweetCount && tweetCount > 0) {
-        console.log(`📍 No new tweets loaded after ${scrollAttempts} scrolls`);
+      console.log(`📜 Scroll ${scrollAttempts + 1}: Found ${currentCount} tweets`);
+      
+      if (currentCount === lastTweetCount) {
+        stableCount++;
+        console.log(`⏸️ Tweet count stable (${stableCount}/${MAX_STABLE_ATTEMPTS})`);
+      } else {
+        stableCount = 0; // Reset if we got new tweets
+      }
+      
+      // If we have enough tweets and count is stable, we can stop
+      if (currentCount >= maxTweets && stableCount >= MAX_STABLE_ATTEMPTS) {
+        console.log(`✅ Found enough tweets (${currentCount}) and count is stable, stopping`);
         break;
       }
       
-      // If we have enough tweets, stop scrolling
-      if (currentCount >= targetTweets) {
-        console.log(`✅ Found enough tweets (${currentCount}), stopping scroll`);
-        break;
-      }
-      
+      lastTweetCount = tweetCount;
       tweetCount = currentCount;
-      console.log(`📜 Scroll ${scrollAttempts + 1}: Found ${tweetCount} tweets`);
       
-      // Smaller scroll to load tweets more gradually
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 1.5));
+      // Controlled scrolling - smaller increments to get more precise loading
+      await page.evaluate(() => {
+        const scrollHeight = document.documentElement.scrollHeight;
+        const currentScroll = window.pageYOffset;
+        const clientHeight = window.innerHeight;
+        
+        // If we're not at the bottom, scroll by one viewport
+        if (currentScroll + clientHeight < scrollHeight - 100) {
+          window.scrollBy(0, clientHeight * 0.8);
+        }
+      });
+      
+      // Wait for content to load with longer delay for recent tweets
       await new Promise(resolve => setTimeout(resolve, SCROLL_DELAY));
       scrollAttempts++;
     }
@@ -173,11 +235,20 @@ app.post('/scrape', async (req, res) => {
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
+      const now = new Date();
+      
+      console.log(`Processing ${articles.length} articles...`);
       
       // Process articles and collect tweet data
-      for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
+      for (let i = 0; i < articles.length; i++) {
         const article = articles[i];
         try {
+          // Skip promoted tweets
+          if (article.querySelector('[data-testid="promotedIndicator"]')) {
+            console.log(`Skipping promoted tweet at index ${i}`);
+            continue;
+          }
+          
           const textElement = article.querySelector('[data-testid="tweetText"]');
           const text = textElement ? textElement.innerText.trim() : '';
           
@@ -189,8 +260,18 @@ app.post('/scrape', async (req, res) => {
           let likes = 0;
           if (likeElement) {
             const ariaLabel = likeElement.getAttribute('aria-label') || '';
-            const likeMatch = ariaLabel.match(/(\d+)/);
-            likes = likeMatch ? parseInt(likeMatch[1], 10) : 0;
+            // Try different patterns for like count extraction
+            const likeMatch = ariaLabel.match(/(\d+(?:,\d+)*(?:\.\d+)?[KMB]?)/);
+            if (likeMatch) {
+              const likeStr = likeMatch[1];
+              if (likeStr.includes('K')) {
+                likes = Math.floor(parseFloat(likeStr) * 1000);
+              } else if (likeStr.includes('M')) {
+                likes = Math.floor(parseFloat(likeStr) * 1000000);
+              } else {
+                likes = parseInt(likeStr.replace(/,/g, ''), 10) || 0;
+              }
+            }
           }
           
           // Retweet count
@@ -198,8 +279,17 @@ app.post('/scrape', async (req, res) => {
           let retweets = 0;
           if (retweetElement) {
             const ariaLabel = retweetElement.getAttribute('aria-label') || '';
-            const retweetMatch = ariaLabel.match(/(\d+)/);
-            retweets = retweetMatch ? parseInt(retweetMatch[1], 10) : 0;
+            const retweetMatch = ariaLabel.match(/(\d+(?:,\d+)*(?:\.\d+)?[KMB]?)/);
+            if (retweetMatch) {
+              const retweetStr = retweetMatch[1];
+              if (retweetStr.includes('K')) {
+                retweets = Math.floor(parseFloat(retweetStr) * 1000);
+              } else if (retweetStr.includes('M')) {
+                retweets = Math.floor(parseFloat(retweetStr) * 1000000);
+              } else {
+                retweets = parseInt(retweetStr.replace(/,/g, ''), 10) || 0;
+              }
+            }
           }
           
           // Reply count
@@ -207,12 +297,22 @@ app.post('/scrape', async (req, res) => {
           let replies = 0;
           if (replyElement) {
             const ariaLabel = replyElement.getAttribute('aria-label') || '';
-            const replyMatch = ariaLabel.match(/(\d+)/);
-            replies = replyMatch ? parseInt(replyMatch[1], 10) : 0;
+            const replyMatch = ariaLabel.match(/(\d+(?:,\d+)*(?:\.\d+)?[KMB]?)/);
+            if (replyMatch) {
+              const replyStr = replyMatch[1];
+              if (replyStr.includes('K')) {
+                replies = Math.floor(parseFloat(replyStr) * 1000);
+              } else if (replyStr.includes('M')) {
+                replies = Math.floor(parseFloat(replyStr) * 1000000);
+              } else {
+                replies = parseInt(replyStr.replace(/,/g, ''), 10) || 0;
+              }
+            }
           }
           
           const verified = !!article.querySelector('[data-testid="icon-verified"]') || 
-                          !!article.querySelector('svg[aria-label="Verified account"]');
+                          !!article.querySelector('svg[aria-label="Verified account"]') ||
+                          !!article.querySelector('[aria-label*="Verified"]');
           
           // Better username extraction
           const userElement = article.querySelector('[data-testid="User-Name"]');
@@ -227,13 +327,32 @@ app.post('/scrape', async (req, res) => {
           const tweetId = link.match(/status\/(\d+)/)?.[1] || '';
           
           const timeElement = article.querySelector('time');
-          const timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
+          let timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
           const relativeTime = timeElement ? timeElement.innerText : '';
           
-          // Only include tweets with actual content (skip retweets without comments)
+          // Parse timestamp to ensure it's valid
+          let tweetDate;
+          try {
+            tweetDate = new Date(timestamp);
+            if (isNaN(tweetDate.getTime())) {
+              tweetDate = now;
+              timestamp = now.toISOString();
+            }
+          } catch (e) {
+            tweetDate = now;
+            timestamp = now.toISOString();
+          }
+          
+          // Only include tweets with actual content and valid data
           if (text && link && tweetId) {
             // Check if it's a retweet
-            const isRetweet = article.querySelector('[data-testid="socialContext"]')?.innerText?.includes('retweeted') || false;
+            const isRetweet = article.querySelector('[data-testid="socialContext"]')?.innerText?.includes('retweeted') || 
+                             article.querySelector('[data-testid="socialContext"]')?.innerText?.includes('Retweeted') ||
+                             text.startsWith('RT @') ||
+                             false;
+            
+            // Calculate age in hours for debugging
+            const ageHours = (now - tweetDate) / (1000 * 60 * 60);
             
             tweetData.push({
               id: tweetId,
@@ -248,7 +367,8 @@ app.post('/scrape', async (req, res) => {
               timestamp,
               relativeTime,
               isRetweet,
-              position: tweetData.length + 1, // Track position in timeline
+              ageHours: Math.round(ageHours * 100) / 100, // Round to 2 decimal places
+              position: i + 1, // Track position in original timeline
               scraped_at: new Date().toISOString()
             });
           }
@@ -257,16 +377,30 @@ app.post('/scrape', async (req, res) => {
         }
       }
       
+      console.log(`Extracted ${tweetData.length} valid tweets from ${articles.length} articles`);
       return tweetData;
     }, maxTweets);
 
-    // Sort tweets by timestamp to ensure we have the most recent ones
+    // Sort tweets by timestamp to ensure we have the most recent ones first
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
     // Take only the requested number of most recent tweets
     const recentTweets = tweets.slice(0, maxTweets);
+    
+    // Add final position numbers based on recency
+    recentTweets.forEach((tweet, index) => {
+      tweet.finalPosition = index + 1;
+    });
 
     console.log(`🎯 Successfully extracted ${recentTweets.length} most recent tweets`);
+    
+    // Log the age distribution for debugging
+    const ageDistribution = recentTweets.map(t => ({ 
+      id: t.id, 
+      relativeTime: t.relativeTime, 
+      ageHours: t.ageHours 
+    }));
+    console.log('📊 Tweet age distribution:', ageDistribution);
     
     res.json({
       success: true,
@@ -274,7 +408,12 @@ app.post('/scrape', async (req, res) => {
       requested: maxTweets,
       tweets: recentTweets,
       scraped_at: new Date().toISOString(),
-      profile_url: searchURL
+      profile_url: searchURL,
+      debug: {
+        totalTweetsFound: tweets.length,
+        oldestTweetHours: tweets.length > 0 ? Math.max(...tweets.map(t => t.ageHours)) : 0,
+        newestTweetHours: tweets.length > 0 ? Math.min(...tweets.map(t => t.ageHours)) : 0
+      }
     });
 
   } catch (error) {
