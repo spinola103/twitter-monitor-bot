@@ -35,22 +35,23 @@ function findChrome() {
 app.get('/', (req, res) => {
   const chromePath = findChrome();
   res.json({ 
-    status: 'Twitter Scraper API Ready', 
+    status: 'Twitter Scraper API Ready - Top 10 Recent Tweets', 
     chrome: chromePath || 'default',
     timestamp: new Date().toISOString() 
   });
 });
 
-// Main scraping endpoint
+// Main scraping endpoint for top 10 recent tweets
 app.post('/scrape', async (req, res) => {
   const searchURL = req.body.url || process.env.TWITTER_SEARCH_URL;
+  const maxTweets = req.body.maxTweets || 10; // Default to 10, allow customization
   
   if (!searchURL) {
     return res.status(400).json({ error: 'No Twitter URL provided' });
   }
 
-  const SCROLL_DELAY = parseInt(process.env.SCROLL_DELAY) || 2000;
-  const MAX_SCROLL_ATTEMPTS = parseInt(process.env.MAX_SCROLL_ATTEMPTS) || 5;
+  const SCROLL_DELAY = parseInt(process.env.SCROLL_DELAY) || 1500; // Reduced delay
+  const MAX_SCROLL_ATTEMPTS = 3; // Reduced since we only need 10 tweets
 
   let browser;
   try {
@@ -120,7 +121,7 @@ app.post('/scrape', async (req, res) => {
     console.log('🌐 Navigating to:', searchURL);
     await page.goto(searchURL, { 
       waitUntil: 'domcontentloaded',
-      timeout: 30000 // Reduced timeout
+      timeout: 30000
     });
 
     // Wait for tweets to load
@@ -137,33 +138,45 @@ app.post('/scrape', async (req, res) => {
       throw new Error('No tweets found on this page');
     }
 
-    // Scroll to load more tweets
+    // Modified scrolling logic to get top 10 recent tweets
     let scrollAttempts = 0;
     let tweetCount = 0;
+    const targetTweets = maxTweets + 5; // Get a few extra to ensure we have enough valid tweets
     
-    while (scrollAttempts < MAX_SCROLL_ATTEMPTS) {
+    console.log(`🎯 Target: ${maxTweets} most recent tweets`);
+    
+    while (scrollAttempts < MAX_SCROLL_ATTEMPTS && tweetCount < targetTweets) {
       const currentCount = await page.$$eval('article', articles => articles.length);
       
       if (currentCount === tweetCount && tweetCount > 0) {
-        console.log(`📍 No new tweets loaded, stopping at ${tweetCount} tweets`);
+        console.log(`📍 No new tweets loaded after ${scrollAttempts} scrolls`);
+        break;
+      }
+      
+      // If we have enough tweets, stop scrolling
+      if (currentCount >= targetTweets) {
+        console.log(`✅ Found enough tweets (${currentCount}), stopping scroll`);
         break;
       }
       
       tweetCount = currentCount;
       console.log(`📜 Scroll ${scrollAttempts + 1}: Found ${tweetCount} tweets`);
       
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+      // Smaller scroll to load tweets more gradually
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 1.5));
       await new Promise(resolve => setTimeout(resolve, SCROLL_DELAY));
       scrollAttempts++;
     }
 
-    console.log(`✅ Final tweet count: ${tweetCount}`);
+    console.log(`✅ Final tweet count before processing: ${tweetCount}`);
 
-    const tweets = await page.evaluate(() => {
+    const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       
-      articles.forEach((article, index) => {
+      // Process articles and collect tweet data
+      for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
+        const article = articles[i];
         try {
           const textElement = article.querySelector('[data-testid="tweetText"]');
           const text = textElement ? textElement.innerText.trim() : '';
@@ -180,49 +193,88 @@ app.post('/scrape', async (req, res) => {
             likes = likeMatch ? parseInt(likeMatch[1], 10) : 0;
           }
           
+          // Retweet count
+          const retweetElement = article.querySelector('[data-testid="retweet"]');
+          let retweets = 0;
+          if (retweetElement) {
+            const ariaLabel = retweetElement.getAttribute('aria-label') || '';
+            const retweetMatch = ariaLabel.match(/(\d+)/);
+            retweets = retweetMatch ? parseInt(retweetMatch[1], 10) : 0;
+          }
+          
+          // Reply count
+          const replyElement = article.querySelector('[data-testid="reply"]');
+          let replies = 0;
+          if (replyElement) {
+            const ariaLabel = replyElement.getAttribute('aria-label') || '';
+            const replyMatch = ariaLabel.match(/(\d+)/);
+            replies = replyMatch ? parseInt(replyMatch[1], 10) : 0;
+          }
+          
           const verified = !!article.querySelector('[data-testid="icon-verified"]') || 
                           !!article.querySelector('svg[aria-label="Verified account"]');
           
           // Better username extraction
           const userElement = article.querySelector('[data-testid="User-Name"]');
           let username = '';
+          let displayName = '';
           if (userElement) {
             const userText = userElement.innerText.split('\n');
-            username = userText[0] || '';
+            displayName = userText[0] || '';
+            username = userText[1] || '';
           }
 
           const tweetId = link.match(/status\/(\d+)/)?.[1] || '';
           
           const timeElement = article.querySelector('time');
           const timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
+          const relativeTime = timeElement ? timeElement.innerText : '';
           
+          // Only include tweets with actual content (skip retweets without comments)
           if (text && link && tweetId) {
+            // Check if it's a retweet
+            const isRetweet = article.querySelector('[data-testid="socialContext"]')?.innerText?.includes('retweeted') || false;
+            
             tweetData.push({
               id: tweetId,
               username: username.replace(/^@/, ''), // Remove @ if present
+              displayName: displayName,
               text,
               link,
               likes,
+              retweets,
+              replies,
               verified,
               timestamp,
+              relativeTime,
+              isRetweet,
+              position: tweetData.length + 1, // Track position in timeline
               scraped_at: new Date().toISOString()
             });
           }
         } catch (e) {
-          console.error(`Error processing tweet ${index}:`, e.message);
+          console.error(`Error processing tweet ${i}:`, e.message);
         }
-      });
+      }
       
       return tweetData;
-    });
+    }, maxTweets);
 
-    console.log(`🎯 Successfully extracted ${tweets.length} tweets`);
+    // Sort tweets by timestamp to ensure we have the most recent ones
+    tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    // Take only the requested number of most recent tweets
+    const recentTweets = tweets.slice(0, maxTweets);
+
+    console.log(`🎯 Successfully extracted ${recentTweets.length} most recent tweets`);
     
     res.json({
       success: true,
-      count: tweets.length,
-      tweets,
-      scraped_at: new Date().toISOString()
+      count: recentTweets.length,
+      requested: maxTweets,
+      tweets: recentTweets,
+      scraped_at: new Date().toISOString(),
+      profile_url: searchURL
     });
 
   } catch (error) {
@@ -243,10 +295,32 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
+// New endpoint specifically for getting recent tweets from a username
+app.post('/scrape-user', async (req, res) => {
+  const username = req.body.username;
+  const maxTweets = req.body.maxTweets || 10;
+  
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+  
+  // Clean username (remove @ if present)
+  const cleanUsername = username.replace(/^@/, '');
+  const profileURL = `https://x.com/${cleanUsername}`;
+  
+  // Use the existing scrape logic
+  req.body.url = profileURL;
+  req.body.maxTweets = maxTweets;
+  
+  // Forward to main scrape endpoint
+  return app._router.handle({ ...req, url: '/scrape', method: 'POST' }, res);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
   console.log(`📊 Memory usage:`, process.memoryUsage());
   console.log(`🔍 Chrome executable:`, findChrome() || 'default');
+  console.log(`🎯 Configured for top 10 most recent tweets per account`);
 });
 
 // Graceful shutdown
