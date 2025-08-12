@@ -1,6 +1,6 @@
 FROM node:18
 
-# Install Chromium dependencies
+# Install Chromium dependencies for Puppeteer
 RUN apt-get update && apt-get install -y \
   ca-certificates \
   fonts-liberation \
@@ -17,15 +17,21 @@ RUN apt-get update && apt-get install -y \
   libxcomposite1 \
   libxdamage1 \
   libxrandr2 \
+  libgbm1 \
+  libxshmfence1 \
   xdg-utils \
   wget \
-  --no-install-recommends && rm -rf /var/lib/apt/lists/*
+  unzip \
+  --no-install-recommends && \
+  rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Install dependencies
 COPY package*.json ./
-RUN npm install
+RUN npm install --omit=dev
 
+# Copy app source
 COPY . .
 
 EXPOSE 3000
