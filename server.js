@@ -27,7 +27,8 @@ app.post('/scrape', async (req, res) => {
 
   try {
     const browser = await puppeteer.launch({
-      headless: 'new', // ✅ Force headless for Railway
+      headless: 'new', // Headless mode for Railway
+      executablePath: '/usr/bin/chromium', // ✅ Use system Chromium
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -46,7 +47,7 @@ app.post('/scrape', async (req, res) => {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
 
-    // ✅ Load cookies from environment variable
+    // Load cookies from environment variable
     try {
       if (process.env.TWITTER_COOKIES) {
         const cookies = JSON.parse(process.env.TWITTER_COOKIES);
@@ -65,7 +66,6 @@ app.post('/scrape', async (req, res) => {
       timeout: 60000 
     });
 
-    // Wait for the main content to load
     await page.waitForSelector('article', { timeout: 15000 });
 
     // Scroll to load more tweets
@@ -80,18 +80,13 @@ app.post('/scrape', async (req, res) => {
       }
       
       tweetCount = currentCount;
-      
-      await page.evaluate(() => {
-        window.scrollBy(0, window.innerHeight);
-      });
-      
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
       await new Promise(resolve => setTimeout(resolve, SCROLL_DELAY));
       scrollAttempts++;
     }
 
     console.log(`✅ Loaded ${tweetCount} tweets`);
 
-    // Extract tweets - your existing logic
     const tweets = await page.evaluate(() => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
@@ -113,10 +108,8 @@ app.post('/scrape', async (req, res) => {
           const userElement = article.querySelector('[data-testid="User-Name"]');
           const username = userElement ? userElement.innerText.split('\n')[0] : '';
 
-          // Get tweet ID
           const tweetId = link.match(/status\/(\d+)/)?.[1] || '';
           
-          // Get timestamp
           const timeElement = article.querySelector('time');
           const timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
           
@@ -142,11 +135,10 @@ app.post('/scrape', async (req, res) => {
 
     await browser.close();
     
-    // ✅ Return JSON response instead of console.log
     res.json({
       success: true,
       count: tweets.length,
-      tweets: tweets,
+      tweets,
       scraped_at: new Date().toISOString()
     });
 
@@ -162,6 +154,4 @@ app.post('/scrape', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
-  console.log(`📡 Health check: http://localhost:${PORT}/`);
-  console.log(`🐦 Scrape endpoint: POST http://localhost:${PORT}/scrape`);
 });
