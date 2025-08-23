@@ -371,9 +371,19 @@ app.post('/scrape', async (req, res) => {
 }, maxTweets);
 
     // Sort by timestamp (newest first)
-    tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    const finalTweets = tweets.slice(0, maxTweets);
+tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+// 🚫 Extra filter: drop pinned/old tweets
+const cutoff = new Date();
+cutoff.setDate(cutoff.getDate() - 2); // ignore anything older than 2 days
+
+const finalTweets = tweets
+  .filter(t => {
+    // If pinned slipped through, it'll usually be much older than cutoff
+    return new Date(t.timestamp) >= cutoff;
+  })
+  .slice(0, maxTweets);
+
     
     console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} tweets!`);
 
