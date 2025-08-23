@@ -61,6 +61,8 @@ app.post('/scrape', async (req, res) => {
       headless: 'new',
       args: [
         '--no-sandbox',
+        '--single-process',  // ADD THIS LINE
+        '--max_old_space_size=512',  // ADD THIS LINE
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
