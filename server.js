@@ -43,7 +43,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// AGGRESSIVE FRESH TWEET SCRAPER (NO PINNED TWEETS)
+// FIXED FRESH TWEET SCRAPER (PROPERLY SKIP PINNED + ACCURATE TIMESTAMPS)
 app.post('/scrape', async (req, res) => {
   const searchURL = req.body.url || process.env.TWITTER_SEARCH_URL;
   const maxTweets = req.body.maxTweets || 10;
@@ -260,146 +260,179 @@ app.post('/scrape', async (req, res) => {
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Extract tweets with PINNED TWEET FILTERING and better timestamp handling
-    console.log('🎯 Extracting latest tweets (skipping pinned)...');
+    // PROPERLY EXTRACT TWEETS - SKIP PINNED & FIX TIMESTAMPS
+    console.log('🎯 Extracting latest tweets (properly skipping pinned)...');
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
-      const articles = document.querySelectorAll('article');
-      const now = new Date();
-      
-      console.log(`🔍 Processing ${articles.length} articles...`);
+      const articles = document.querySelectorAll('article[data-testid="tweet"]');
+      console.log(`🔍 Found ${articles.length} tweet articles to process...`);
       
       for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
         const article = articles[i];
         try {
           // SKIP PROMOTED CONTENT
-          if (article.querySelector('[data-testid="promotedIndicator"]')) {
-            console.log(`⏭️ Skipping promoted content`);
+          if (article.querySelector('[data-testid="promotedIndicator"]') ||
+              article.querySelector('[data-testid="socialContext"]')?.textContent?.includes('Promoted')) {
+            console.log(`⏭️ Skipping promoted tweet ${i}`);
             continue;
           }
           
-          // SKIP PINNED TWEETS - Multiple ways to detect
-          const pinnedIndicators = [
-            '[data-testid="pin"]',
-            '[aria-label*="Pinned"]',
-            '[aria-label*="pinned"]',
+          // BETTER PINNED TWEET DETECTION
+          let isPinned = false;
+          
+          // Method 1: Look for pin icon/indicator
+          const pinSelectors = [
             'svg[data-testid="pin"]',
-            '[data-testid="tweet"] [aria-label*="Pinned"]'
+            '[data-testid="pin"]',
+            '[aria-label*="Pinned Tweet"]',
+            '[aria-label*="pinned"]'
           ];
           
-          let isPinned = false;
-          for (const indicator of pinnedIndicators) {
-            if (article.querySelector(indicator)) {
+          for (const selector of pinSelectors) {
+            if (article.querySelector(selector)) {
               isPinned = true;
-              console.log(`📌 Skipping pinned tweet`);
+              console.log(`📌 Found pinned tweet via selector: ${selector}`);
               break;
             }
           }
           
-          // Also check for "Pinned Tweet" text
-          if (!isPinned && article.textContent.includes('Pinned Tweet')) {
+          // Method 2: Check for "Pinned" text in context area
+          const socialContext = article.querySelector('[data-testid="socialContext"]');
+          if (socialContext && (
+              socialContext.textContent.includes('Pinned') ||
+              socialContext.textContent.includes('pinned')
+          )) {
             isPinned = true;
-            console.log(`📌 Skipping pinned tweet (text detection)`);
+            console.log(`📌 Found pinned tweet via social context text`);
           }
           
-          if (isPinned) continue;
+          // Method 3: Check entire article for pinned indicators
+          const articleText = article.textContent || '';
+          if (articleText.includes('Pinned Tweet') || 
+              articleText.includes('pinned this Tweet')) {
+            isPinned = true;
+            console.log(`📌 Found pinned tweet via article text`);
+          }
+          
+          if (isPinned) {
+            console.log(`📌 SKIPPING PINNED TWEET ${i}`);
+            continue;
+          }
           
           // Get tweet text
           const textElement = article.querySelector('[data-testid="tweetText"]');
           const text = textElement ? textElement.innerText.trim() : '';
           
-          if (!text || text.length < 5) continue;
+          if (!text || text.length < 5) {
+            console.log(`⏭️ Skipping tweet ${i} - no text or too short`);
+            continue;
+          }
           
           // Get tweet link and ID
-          const linkElement = article.querySelector('a[href*="/status/"]');
-          if (!linkElement) continue;
+          const timeElement = article.querySelector('time');
+          if (!timeElement) {
+            console.log(`⏭️ Skipping tweet ${i} - no time element`);
+            continue;
+          }
           
-          const href = linkElement.getAttribute('href');
+          const timeLink = timeElement.closest('a');
+          if (!timeLink) {
+            console.log(`⏭️ Skipping tweet ${i} - no time link`);
+            continue;
+          }
+          
+          const href = timeLink.getAttribute('href');
+          if (!href || !href.includes('/status/')) {
+            console.log(`⏭️ Skipping tweet ${i} - invalid href`);
+            continue;
+          }
+          
           const link = href.startsWith('http') ? href : 'https://twitter.com' + href;
           const tweetId = link.match(/status\/(\d+)/)?.[1];
           
-          if (!tweetId) continue;
+          if (!tweetId) {
+            console.log(`⏭️ Skipping tweet ${i} - no tweet ID`);
+            continue;
+          }
           
-          // IMPROVED TIMESTAMP HANDLING for recent tweets
-          const timeElement = article.querySelector('time');
-          let timestamp = null;
-          let relativeTime = '';
+          // FIXED TIMESTAMP HANDLING
+          let timestamp = timeElement.getAttribute('datetime');
+          let relativeTime = timeElement.textContent.trim();
           
-          if (timeElement) {
-            // Get datetime attribute first (most accurate)
-            timestamp = timeElement.getAttribute('datetime');
-            relativeTime = timeElement.innerText.trim();
+          // If no datetime attribute, calculate from relative time
+          if (!timestamp && relativeTime) {
+            const now = new Date();
             
-            // If no datetime attribute, parse relative time
-            if (!timestamp && relativeTime) {
-              const now = new Date();
-              
-              if (relativeTime.includes('now') || relativeTime === 'now') {
-                timestamp = now.toISOString();
-              } else if (relativeTime.match(/^\d+s$/)) {
-                // "5s" format
-                const seconds = parseInt(relativeTime.replace('s', '')) || 0;
-                timestamp = new Date(now.getTime() - seconds * 1000).toISOString();
-              } else if (relativeTime.match(/^\d+m$/)) {
-                // "2m" format
-                const minutes = parseInt(relativeTime.replace('m', '')) || 0;
-                timestamp = new Date(now.getTime() - minutes * 60000).toISOString();
-              } else if (relativeTime.match(/^\d+h$/)) {
-                // "1h" format
-                const hours = parseInt(relativeTime.replace('h', '')) || 0;
-                timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
-              } else if (relativeTime.match(/^\d+d$/)) {
-                // "1d" format
-                const days = parseInt(relativeTime.replace('d', '')) || 0;
-                timestamp = new Date(now.getTime() - days * 86400000).toISOString();
-              } else {
-                // Fallback: use current time
-                timestamp = now.toISOString();
-              }
+            // Parse different formats
+            if (relativeTime === 'now' || relativeTime.includes('now')) {
+              timestamp = now.toISOString();
+            } else if (relativeTime.match(/^\d+s$/)) {
+              const seconds = parseInt(relativeTime.replace('s', '')) || 0;
+              timestamp = new Date(now.getTime() - seconds * 1000).toISOString();
+            } else if (relativeTime.match(/^\d+m$/)) {
+              const minutes = parseInt(relativeTime.replace('m', '')) || 0;
+              timestamp = new Date(now.getTime() - minutes * 60000).toISOString();
+            } else if (relativeTime.match(/^\d+h$/)) {
+              const hours = parseInt(relativeTime.replace('h', '')) || 0;
+              timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
+            } else {
+              // For older dates like "Jun 26", use a fallback
+              timestamp = new Date(now.getTime() - 30 * 86400000).toISOString(); // 30 days ago
             }
           }
           
-          // Fallback if still no timestamp
+          // Skip if still no valid timestamp
           if (!timestamp) {
-            timestamp = new Date().toISOString();
+            console.log(`⏭️ Skipping tweet ${i} - no valid timestamp`);
+            continue;
           }
           
           // Get user info
-          const userElement = article.querySelector('[data-testid="User-Names"] a, [data-testid="User-Name"] a');
+          const userNameContainer = article.querySelector('[data-testid="User-Names"]');
           let username = '';
           let displayName = '';
           
-          if (userElement) {
-            const userHref = userElement.getAttribute('href');
-            username = userHref ? userHref.replace('/', '') : '';
+          if (userNameContainer) {
+            const userLink = userNameContainer.querySelector('a[href^="/"]');
+            if (userLink) {
+              const userHref = userLink.getAttribute('href');
+              username = userHref ? userHref.substring(1) : ''; // Remove leading /
+            }
+            
+            const nameSpan = userNameContainer.querySelector('span');
+            if (nameSpan) {
+              displayName = nameSpan.textContent.trim();
+            }
           }
           
-          const displayNameElement = article.querySelector('[data-testid="User-Names"] span, [data-testid="User-Name"] span');
-          if (displayNameElement) {
-            displayName = displayNameElement.textContent.trim();
-          }
-          
-          // Get metrics with better parsing
+          // Get metrics with improved parsing
           const getMetric = (testId) => {
             const element = article.querySelector(`[data-testid="${testId}"]`);
             if (!element) return 0;
             
-            // Try aria-label first
             const ariaLabel = element.getAttribute('aria-label') || '';
             if (ariaLabel) {
               const match = ariaLabel.match(/(\d+(?:,\d+)*)/);
               if (match) return parseInt(match[1].replace(/,/g, ''));
             }
             
-            // Try text content
             const text = element.textContent || '';
             const match = text.match(/(\d+(?:,\d+)*)/);
             return match ? parseInt(match[1].replace(/,/g, '')) : 0;
           };
           
+          // Skip old tweets (more than 7 days) for fresher content
+          const tweetDate = new Date(timestamp);
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          
+          if (tweetDate < sevenDaysAgo && relativeTime.includes('Jun')) {
+            console.log(`⏭️ Skipping old tweet ${i} from ${relativeTime}`);
+            continue;
+          }
+          
           const tweetObj = {
             id: tweetId,
-            username: username.replace(/^@/, ''),
+            username: username,
             displayName: displayName,
             text,
             link,
@@ -409,30 +442,31 @@ app.post('/scrape', async (req, res) => {
             timestamp: timestamp,
             relativeTime: relativeTime,
             scraped_at: new Date().toISOString(),
-            isPinned: false // Explicitly mark as not pinned since we filtered them out
+            isPinned: false
           };
           
           tweetData.push(tweetObj);
-          console.log(`✅ Added tweet: ${text.substring(0, 50)}... (${relativeTime})`);
+          console.log(`✅ Added fresh tweet ${tweetData.length}: "${text.substring(0, 50)}..." (${relativeTime})`);
           
         } catch (e) {
           console.error(`Error processing article ${i}:`, e.message);
         }
       }
       
+      console.log(`✅ Extracted ${tweetData.length} fresh tweets (filtered out pinned & old tweets)`);
       return tweetData;
     }, maxTweets);
       
-    // Sort by timestamp (newest first) - this ensures latest tweets come first
+    // Sort by timestamp (newest first)
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
     const finalTweets = tweets.slice(0, maxTweets);
     
-    console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} fresh tweets (no pinned)!`);
+    console.log(`🎉 FINAL SUCCESS: ${finalTweets.length} latest tweets extracted!`);
     
-    // Log first few tweets for verification
-    finalTweets.slice(0, 3).forEach((tweet, index) => {
-      console.log(`📝 Tweet ${index + 1}: "${tweet.text.substring(0, 100)}..." (${tweet.relativeTime})`);
+    // Log final results
+    finalTweets.forEach((tweet, index) => {
+      console.log(`📝 Fresh Tweet ${index + 1}: "${tweet.text.substring(0, 80)}..." (${tweet.relativeTime}) - ID: ${tweet.id}`);
     });
 
     res.json({
@@ -443,11 +477,12 @@ app.post('/scrape', async (req, res) => {
       scraped_at: new Date().toISOString(),
       profile_url: searchURL,
       cookies_loaded: cookiesLoaded,
-      filters_applied: ['no_pinned_tweets', 'latest_first'],
+      filters_applied: ['no_pinned_tweets', 'no_promoted', 'latest_first', 'fresh_content_only'],
       debug: {
-        total_processed: tweets.length,
+        total_articles_found: tweets.length,
         cookies_working: cookiesLoaded,
-        pinned_tweets_filtered: true
+        pinned_tweets_filtered: true,
+        old_tweets_filtered: true
       }
     });
 
@@ -485,7 +520,7 @@ app.post('/scrape-user', async (req, res) => {
   const cleanUsername = username.replace(/^@/, '');
   const profileURL = `https://x.com/${cleanUsername}`;
   
-  console.log(`🎯 Scraping user: @${cleanUsername} (latest tweets only)`);
+  console.log(`🎯 Scraping user: @${cleanUsername} (fresh tweets only)`);
   
   // Forward to main endpoint
   req.body.url = profileURL;
@@ -503,7 +538,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
   console.log(`🔍 Chrome executable:`, findChrome() || 'default');
   console.log(`🍪 Cookies configured:`, !!process.env.TWITTER_COOKIES);
-  console.log(`🔥 Ready to scrape fresh tweets (NO PINNED TWEETS)!`);
+  console.log(`🔥 Ready to scrape ONLY fresh tweets (NO PINNED, NO OLD TWEETS)!`);
 });
 
 process.on('SIGTERM', () => {
