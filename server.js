@@ -264,108 +264,105 @@ app.post('/scrape', async (req, res) => {
     // Extract tweets with better error handling
     console.log('🎯 Extracting tweets...');
     const tweets = await page.evaluate((maxTweets) => {
-      const tweetData = [];
-      const articles = document.querySelectorAll('article');
-      const now = new Date();
-      const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
-      
-      console.log(`🔍 Processing ${articles.length} articles...`);
-      
-      for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
-        const article = articles[i];
-        try {
-          // Skip promoted content
-          if (article.querySelector('[data-testid="promotedIndicator"]')) {
-            continue;
-          }
-          
-          // Get tweet text
-          const textElement = article.querySelector('[data-testid="tweetText"]');
-          const text = textElement ? textElement.innerText.trim() : '';
-          
-          if (!text || text.length < 5) continue;
-          
-          // Get tweet link and ID
-          const linkElement = article.querySelector('a[href*="/status/"]');
-          if (!linkElement) continue;
-          
-          const href = linkElement.getAttribute('href');
-          const link = href.startsWith('http') ? href : 'https://twitter.com' + href;
-          const tweetId = link.match(/status\/(\d+)/)?.[1];
-          
-          if (!tweetId) continue;
-          
-          // Get timestamp
-          const timeElement = article.querySelector('time');
-          let timestamp = timeElement ? timeElement.getAttribute('datetime') : null;
-          const relativeTime = timeElement ? timeElement.innerText.trim() : '';
-          
-          if (!timestamp && relativeTime) {
-            // For very recent tweets, estimate timestamp
-            const now = new Date();
-            if (relativeTime.includes('s') || relativeTime.includes('now')) {
-              timestamp = now.toISOString();
-            } else if (relativeTime.includes('m')) {
-              const mins = parseInt(relativeTime) || 1;
-              timestamp = new Date(now.getTime() - mins * 60000).toISOString();
-            } else if (relativeTime.includes('h')) {
-              const hours = parseInt(relativeTime) || 1;
-              timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
-            }
-          }
-          
-          if (!timestamp) continue;
-          
-          const tweetDate = new Date(timestamp);
-          if (isNaN(tweetDate.getTime()) || tweetDate < thirtyDaysAgo) continue;
-          
-          // Get user info
-          const userElement = article.querySelector('[data-testid="User-Names"] a, [data-testid="User-Name"] a');
-          let username = '';
-          let displayName = '';
-          
-          if (userElement) {
-            const userHref = userElement.getAttribute('href');
-            username = userHref ? userHref.replace('/', '') : '';
-          }
-          
-          const displayNameElement = article.querySelector('[data-testid="User-Names"] span, [data-testid="User-Name"] span');
-          if (displayNameElement) {
-            displayName = displayNameElement.textContent.trim();
-          }
-          
-          // Get metrics
-          const getMetric = (testId) => {
-            const element = article.querySelector(`[data-testid="${testId}"]`);
-            if (!element) return 0;
-            const text = element.getAttribute('aria-label') || element.textContent || '';
-            const match = text.match(/(\d+(?:,\d+)*)/);
-            return match ? parseInt(match[1].replace(/,/g, '')) : 0;
-          };
-          
-          const tweetObj = {
-            id: tweetId,
-            username: username.replace(/^@/, ''),
-            displayName: displayName,
-            text,
-            link,
-            likes: getMetric('like'),
-            retweets: getMetric('retweet'),
-            replies: getMetric('reply'),
-            timestamp,
-            relativeTime,
-            scraped_at: new Date().toISOString()
-          };
-          
-          tweetData.push(tweetObj);
-          
-        } catch (e) {
-          console.error(`Error processing article ${i}:`, e.message);
+  const tweetData = [];
+  const articles = document.querySelectorAll('article');
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+
+  for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
+    const article = articles[i];
+    try {
+      // Skip promoted
+      if (article.querySelector('[data-testid="promotedIndicator"]')) {
+        continue;
+      }
+
+      // Tweet text (can be empty if only emojis/images)
+      const textElement = article.querySelector('[data-testid="tweetText"]');
+      const text = textElement ? textElement.innerText.trim() : '';
+
+      // Allow tweets even if empty/short
+      if (!text && !article.querySelector('img')) continue;
+
+      // Tweet link + ID
+      const linkElement = article.querySelector('a[href*="/status/"]');
+      if (!linkElement) continue;
+
+      const href = linkElement.getAttribute('href');
+      const link = href.startsWith('http') ? href : 'https://twitter.com' + href;
+      const tweetId = link.match(/status\/(\d+)/)?.[1];
+      if (!tweetId) continue;
+
+      // Timestamp
+      const timeElement = article.querySelector('time');
+      let timestamp = timeElement ? timeElement.getAttribute('datetime') : null;
+      const relativeTime = timeElement ? timeElement.innerText.trim() : '';
+
+      if (!timestamp && relativeTime) {
+        // Handle relative times properly
+        if (relativeTime.includes('s') || relativeTime.toLowerCase().includes('now')) {
+          timestamp = new Date().toISOString();
+        } else if (relativeTime.includes('m')) {
+          const mins = parseInt(relativeTime) || 1;
+          timestamp = new Date(now.getTime() - mins * 60000).toISOString();
+        } else if (relativeTime.includes('h')) {
+          const hours = parseInt(relativeTime) || 1;
+          timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
+        } else if (relativeTime.includes('d')) {
+          const days = parseInt(relativeTime) || 1;
+          timestamp = new Date(now.getTime() - days * 86400000).toISOString();
         }
       }
-      
-      return tweetData;
-    }, maxTweets);
+
+      if (!timestamp) continue;
+      const tweetDate = new Date(timestamp);
+      if (isNaN(tweetDate.getTime()) || tweetDate < thirtyDaysAgo) continue;
+
+      // User info
+      const userElement = article.querySelector('[data-testid="User-Names"] a, [data-testid="User-Name"] a');
+      let username = '';
+      let displayName = '';
+
+      if (userElement) {
+        const userHref = userElement.getAttribute('href');
+        username = userHref ? userHref.replace('/', '') : '';
+      }
+
+      const displayNameElement = article.querySelector('[data-testid="User-Names"] span, [data-testid="User-Name"] span');
+      if (displayNameElement) {
+        displayName = displayNameElement.textContent.trim();
+      }
+
+      // Metrics
+      const getMetric = (testId) => {
+        const element = article.querySelector(`[data-testid="${testId}"]`);
+        if (!element) return 0;
+        const text = element.getAttribute('aria-label') || element.textContent || '';
+        const match = text.match(/(\d+(?:,\d+)*)/);
+        return match ? parseInt(match[1].replace(/,/g, '')) : 0;
+      };
+
+      tweetData.push({
+        id: tweetId,
+        username: username.replace(/^@/, ''),
+        displayName: displayName,
+        text,
+        link,
+        likes: getMetric('like'),
+        retweets: getMetric('retweet'),
+        replies: getMetric('reply'),
+        timestamp,
+        relativeTime,
+        scraped_at: new Date().toISOString()
+      });
+
+    } catch (e) {
+      console.error(`Error processing article ${i}:`, e.message);
+    }
+  }
+
+  return tweetData;
+}, maxTweets);
 
     // Sort by timestamp (newest first)
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
