@@ -259,13 +259,14 @@ app.post('/scrape', async (req, res) => {
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
 
+    // REPLACE the tweet extraction part (around line 200) with this:
+
     // Extract tweets with better error handling
     console.log('🎯 Extracting tweets...');
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       const now = new Date();
-      const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
       
       console.log(`🔍 Processing ${articles.length} articles...`);
       
@@ -293,13 +294,13 @@ app.post('/scrape', async (req, res) => {
           
           if (!tweetId) continue;
           
-          // Get timestamp
+          // Get timestamp - FIXED LOGIC
           const timeElement = article.querySelector('time');
           let timestamp = timeElement ? timeElement.getAttribute('datetime') : null;
           const relativeTime = timeElement ? timeElement.innerText.trim() : '';
           
+          // FIX: Better timestamp handling for recent posts
           if (!timestamp && relativeTime) {
-            // For very recent tweets, estimate timestamp
             const now = new Date();
             if (relativeTime.includes('s') || relativeTime.includes('now')) {
               timestamp = now.toISOString();
@@ -309,13 +310,15 @@ app.post('/scrape', async (req, res) => {
             } else if (relativeTime.includes('h')) {
               const hours = parseInt(relativeTime) || 1;
               timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
+            } else {
+              // FIX: Don't skip if no timestamp - use current time
+              timestamp = now.toISOString();
             }
           }
           
-          if (!timestamp) continue;
-          
-          const tweetDate = new Date(timestamp);
-          if (isNaN(tweetDate.getTime()) || tweetDate < thirtyDaysAgo) continue;
+          // FIX: Don't filter by date - get all tweets
+          // REMOVED: if (!timestamp) continue;
+          // REMOVED: if (isNaN(tweetDate.getTime()) || tweetDate < thirtyDaysAgo) continue;
           
           // Get user info
           const userElement = article.querySelector('[data-testid="User-Names"] a, [data-testid="User-Name"] a');
@@ -350,7 +353,7 @@ app.post('/scrape', async (req, res) => {
             likes: getMetric('like'),
             retweets: getMetric('retweet'),
             replies: getMetric('reply'),
-            timestamp,
+            timestamp: timestamp || now.toISOString(), // FIX: Always have timestamp
             relativeTime,
             scraped_at: new Date().toISOString()
           };
@@ -364,7 +367,7 @@ app.post('/scrape', async (req, res) => {
       
       return tweetData;
     }, maxTweets);
-
+      
     // Sort by timestamp (newest first)
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
