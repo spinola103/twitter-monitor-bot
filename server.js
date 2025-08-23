@@ -191,7 +191,7 @@ app.post('/scrape', async (req, res) => {
       });
     }
 
-    // Wait for content with multiple strategies
+    // Wait for content with multiple strategies and check for pinned tweets
     console.log('⏳ Waiting for tweets to load...');
     
     let tweetsFound = false;
@@ -211,6 +211,16 @@ app.post('/scrape', async (req, res) => {
       } catch (e) {
         console.log(`⏳ Trying next selector...`);
       }
+    }
+    
+    // Additional check: try to detect and skip pinned tweets at page level
+    try {
+      const pinnedExists = await page.$('[aria-label*="Pinned"], [data-testid="socialContext"]');
+      if (pinnedExists) {
+        console.log('🚫 Detected pinned tweet on page - will filter it out');
+      }
+    } catch (e) {
+      // Ignore error
     }
     
     if (!tweetsFound) {
@@ -276,13 +286,29 @@ app.post('/scrape', async (req, res) => {
             continue;
           }
 
-          // 🚫 Skip pinned tweets
-          if (
+          // 🚫 Skip pinned tweets - ENHANCED DETECTION
+          const isPinned = 
+            // Check for pinned indicators
             article.querySelector('[aria-label="Pinned"]') ||
             article.querySelector('[aria-label="Pinned Tweet"]') ||
+            article.querySelector('[data-testid="socialContext"]') ||
+            // Check for pinned text in various languages
             article.innerText.includes('Pinned') ||
-            article.querySelector('[data-testid="socialContext"]')
-          ) {
+            article.innerText.includes('Pinned Tweet') ||
+            article.innerText.includes('📌') ||
+            // Check for specific pinned tweet classes/attributes
+            article.querySelector('.r-1h8ys4a') || // Twitter's pinned indicator class
+            article.querySelector('[data-testid="pin"]') ||
+            // Check parent containers for pinned indicators
+            article.closest('[data-testid="cellInnerDiv"]')?.querySelector('[aria-label*="Pinned"]') ||
+            // Check for timeline context that indicates pinned
+            article.querySelector('span[dir="ltr"]')?.textContent?.includes('Pinned') ||
+            // Check if it's the first tweet and much older than others (likely pinned)
+            (i === 0 && article.querySelector('time')?.getAttribute('datetime') && 
+             new Date() - new Date(article.querySelector('time').getAttribute('datetime')) > 7 * 24 * 60 * 60 * 1000);
+
+          if (isPinned) {
+            console.log('🚫 Skipping pinned tweet');
             continue;
           }
 
@@ -374,14 +400,24 @@ app.post('/scrape', async (req, res) => {
     // Sort by timestamp (newest first)
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    // 🚫 Extra filter: drop pinned/old tweets
+    // 🚫 Extra filter: drop pinned/old tweets - ENHANCED
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 2); // ignore anything older than 2 days
+    cutoff.setDate(cutoff.getDate() - 1); // More strict - ignore anything older than 1 day
 
     const finalTweets = tweets
       .filter(t => {
-        // If pinned slipped through, it'll usually be much older than cutoff
-        return new Date(t.timestamp) >= cutoff;
+        const tweetAge = new Date() - new Date(t.timestamp);
+        const isOld = tweetAge > (24 * 60 * 60 * 1000); // older than 1 day
+        const isPinned = t.text.includes('📌') || 
+                        t.text.toLowerCase().includes('pinned') ||
+                        // If it's significantly older than the newest tweet, likely pinned
+                        (tweets.length > 1 && tweetAge > (new Date() - new Date(tweets[1].timestamp)) * 5);
+        
+        if (isPinned || isOld) {
+          console.log(`🚫 Filtering out ${isPinned ? 'pinned' : 'old'} tweet: ${t.id}`);
+          return false;
+        }
+        return true;
       })
       .slice(0, maxTweets);
     
