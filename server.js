@@ -277,11 +277,18 @@ app.post('/scrape', async (req, res) => {
         continue;
       }
 
-      // Tweet text (can be empty if only emojis/images)
+      // 🚫 Skip pinned tweets
+      if (
+        article.innerText.includes('Pinned') ||
+        article.querySelector('[aria-label="Pinned"]')
+      ) {
+        continue;
+      }
+
+      // Tweet text (allow empty/emoji/media-only tweets)
       const textElement = article.querySelector('[data-testid="tweetText"]');
       const text = textElement ? textElement.innerText.trim() : '';
 
-      // Allow tweets even if empty/short
       if (!text && !article.querySelector('img')) continue;
 
       // Tweet link + ID
@@ -299,7 +306,6 @@ app.post('/scrape', async (req, res) => {
       const relativeTime = timeElement ? timeElement.innerText.trim() : '';
 
       if (!timestamp && relativeTime) {
-        // Handle relative times properly
         if (relativeTime.includes('s') || relativeTime.toLowerCase().includes('now')) {
           timestamp = new Date().toISOString();
         } else if (relativeTime.includes('m')) {
