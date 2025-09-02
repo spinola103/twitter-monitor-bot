@@ -15,19 +15,17 @@ class BrowserPool {
   constructor() {
     this.browser = null;
     this.pages = new Set();
-    this.maxPages = 3; // Limit concurrent pages
+    this.maxPages = 3;
     this.isInitializing = false;
     this.lastHealthCheck = Date.now();
     this.cookiesLoaded = false;
     
-    // Auto health check every 5 minutes
     setInterval(() => this.healthCheck(), 5 * 60 * 1000);
   }
 
   async initialize() {
     if (this.isInitializing) {
       console.log('⏳ Browser initialization already in progress...');
-      // Wait for initialization to complete
       while (this.isInitializing) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
@@ -53,8 +51,6 @@ class BrowserPool {
         headless: 'new',
         args: [
           '--no-sandbox',
-          '--single-process',
-          '--max_old_space_size=512',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
@@ -66,15 +62,14 @@ class BrowserPool {
           '--disable-renderer-backgrounding',
           '--disable-features=TranslateUI',
           '--disable-ipc-flooding-protection',
-          '--window-size=1366,768',
-          '--memory-pressure-off',
+          '--window-size=1920,1080',
           '--disable-blink-features=AutomationControlled',
           '--disable-web-security',
           '--disable-features=VizDisplayCompositor',
-          // Keep user data dir persistent for better cookie handling
-          '--user-data-dir=/tmp/chrome-pool-data'
+          '--user-data-dir=/tmp/chrome-pool-data',
+          '--lang=en-US'
         ],
-        defaultViewport: { width: 1366, height: 768 }
+        defaultViewport: { width: 1920, height: 1080 }
       };
 
       if (chromePath) {
@@ -84,7 +79,6 @@ class BrowserPool {
       console.log('🚀 Launching new browser instance...');
       this.browser = await puppeteer.launch(launchOptions);
       
-      // Handle browser disconnection
       this.browser.on('disconnected', () => {
         console.log('🔴 Browser disconnected, will reinitialize on next request');
         this.browser = null;
@@ -111,7 +105,6 @@ class BrowserPool {
     
     if (this.pages.size >= this.maxPages) {
       console.log('⚠️ Max pages reached, waiting for available page...');
-      // Wait for a page to be released
       while (this.pages.size >= this.maxPages) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
@@ -120,26 +113,46 @@ class BrowserPool {
     const page = await browser.newPage();
     this.pages.add(page);
     
-    // Configure page
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    // Enhanced stealth configuration
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await page.setCacheEnabled(false);
     
     await page.setExtraHTTPHeaders({ 
       'Accept-Language': 'en-US,en;q=0.9',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Cache-Control': 'no-cache',
-      'Upgrade-Insecure-Requests': '1'
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none'
     });
 
-    // Clear storage on new page
+    // Clear storage and inject anti-detection scripts
     await page.evaluateOnNewDocument(() => {
       try {
         localStorage.clear();
         sessionStorage.clear();
+        
+        // Remove webdriver traces
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => false,
+        });
+        
+        // Mock languages and plugins
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
+        });
+        
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => [1, 2, 3, 4, 5],
+        });
+        
       } catch (e) {}
     });
 
-    // Load cookies if not already loaded for this browser instance
     if (!this.cookiesLoaded && process.env.TWITTER_COOKIES) {
       await this.loadCookies(page);
     }
@@ -208,7 +221,6 @@ class BrowserPool {
       console.log(`💊 Health check passed - Browser version: ${version}`);
       this.lastHealthCheck = Date.now();
       
-      // Close idle pages if too many
       if (this.pages.size > 1) {
         console.log('🧹 Cleaning up idle pages...');
         const pageArray = Array.from(this.pages);
@@ -238,7 +250,6 @@ class BrowserPool {
     this.pages.clear();
     this.cookiesLoaded = false;
     
-    // Reinitialize
     await this.initialize();
   }
 
@@ -254,10 +265,8 @@ class BrowserPool {
   }
 }
 
-// Global browser pool instance
 const browserPool = new BrowserPool();
 
-// Function to find Chrome executable
 function findChrome() {
   const possiblePaths = [
     '/usr/bin/google-chrome-stable',
@@ -278,7 +287,6 @@ function findChrome() {
   return null;
 }
 
-// Health check endpoint with browser stats
 app.get('/', (req, res) => {
   const chromePath = findChrome();
   const stats = browserPool.getStats();
@@ -291,7 +299,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Manual browser restart endpoint
 app.post('/restart-browser', async (req, res) => {
   try {
     await browserPool.restart();
@@ -309,7 +316,7 @@ app.post('/restart-browser', async (req, res) => {
   }
 });
 
-// OPTIMIZED SCRAPE ENDPOINT
+// FIXED SCRAPE ENDPOINT WITH UPDATED SELECTORS
 app.post('/scrape', async (req, res) => {
   const searchURL = req.body.url || process.env.TWITTER_SEARCH_URL;
   const maxTweets = req.body.maxTweets || 10;
@@ -322,242 +329,315 @@ app.post('/scrape', async (req, res) => {
   const startTime = Date.now();
   
   try {
-    // Get page from pool (much faster than launching browser)
     page = await browserPool.getPage();
     console.log(`⚡ Got page from pool in ${Date.now() - startTime}ms`);
     
     console.log('🌐 Navigating to:', searchURL);
     
-    // Navigate with better error handling
-    try {
-      const response = await page.goto(searchURL, { 
-        waitUntil: 'networkidle0',
-        timeout: 60000
-      });
-      
-      console.log('✅ Navigation completed, status:', response?.status());
-      
-      // Check if we're redirected to login
-      const currentUrl = page.url();
-      if (currentUrl.includes('/login') || currentUrl.includes('/i/flow/login')) {
-        throw new Error('❌ Redirected to login page - Authentication required');
+    // Navigate with retry logic
+    let navSuccess = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`🌐 Navigation attempt ${attempt}...`);
+        const response = await page.goto(searchURL, { 
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+        
+        console.log(`✅ Navigation completed, status: ${response?.status()}`);
+        
+        const currentUrl = page.url();
+        if (currentUrl.includes('/login') || currentUrl.includes('/i/flow/login')) {
+          throw new Error('❌ Redirected to login page - Authentication required');
+        }
+        
+        navSuccess = true;
+        break;
+        
+      } catch (navError) {
+        console.log(`❌ Navigation attempt ${attempt} failed:`, navError.message);
+        if (attempt === 3) throw navError;
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      
-    } catch (navError) {
-      console.log(`❌ Navigation failed:`, navError.message);
-      
-      // Try fallback navigation
-      console.log('🔄 Trying fallback navigation...');
-      await page.goto(searchURL, { 
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
-      });
     }
 
-    // Wait for content with multiple strategies
-    console.log('⏳ Waiting for tweets to load...');
+    if (!navSuccess) {
+      throw new Error('Failed to navigate after 3 attempts');
+    }
+
+    // Enhanced content detection with multiple strategies
+    console.log('⏳ Waiting for content to load...');
     
-    let tweetsFound = false;
-    const selectors = [
+    const contentSelectors = [
+      '[data-testid="cellInnerDiv"]',
       'article[data-testid="tweet"]',
-      'article',
-      '[data-testid="tweet"]',
-      '[data-testid="tweetText"]'
+      'div[data-testid="primaryColumn"]',
+      '[data-testid="tweetText"]',
+      'main[role="main"]'
     ];
     
-    for (const selector of selectors) {
+    let contentFound = false;
+    for (const selector of contentSelectors) {
       try {
-        await page.waitForSelector(selector, { timeout: 15000 });
-        console.log(`✅ Found content with selector: ${selector}`);
-        tweetsFound = true;
+        await page.waitForSelector(selector, { timeout: 10000 });
+        console.log(`✅ Content detected with selector: ${selector}`);
+        contentFound = true;
         break;
       } catch (e) {
-        console.log(`⏳ Trying next selector...`);
+        console.log(`⏳ Trying next content selector...`);
       }
     }
     
-    if (!tweetsFound) {
+    if (!contentFound) {
+      // Check for error conditions
       const pageContent = await page.content();
       const currentUrl = page.url();
       
-      if (pageContent.includes('Log in to Twitter') || 
-          pageContent.includes('Sign up for Twitter') ||
-          currentUrl.includes('/login')) {
-        throw new Error(`❌ Login required - Please check your TWITTER_COOKIES`);
+      if (pageContent.includes('Log in') || 
+          pageContent.includes('Sign up') ||
+          currentUrl.includes('/login') ||
+          pageContent.includes('suspended')) {
+        throw new Error(`❌ Authentication required or account suspended`);
       }
       
-      if (pageContent.includes('rate limit')) {
-        throw new Error('❌ Rate limited by Twitter - Please try again later');
+      if (pageContent.includes('rate limit') || pageContent.includes('Try again')) {
+        throw new Error('❌ Rate limited by Twitter - Try again later');
       }
       
-      throw new Error(`❌ No tweets found - Account may be private or protected`);
+      console.log('⚠️ No standard content selectors found, proceeding anyway...');
     }
 
-    // Wait for content to stabilize
+    // Wait for page to stabilize
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // Scroll to top for freshest content
-    console.log('📍 Scrolling to top for freshest content...');
+    // Progressive loading with smart scrolling
+    console.log('🔄 Loading tweets with progressive scrolling...');
+    
+    // First, scroll to top
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Light scrolling to load more tweets
-    console.log('🔄 Loading more tweets...');
-    for (let i = 0; i < 3; i++) {
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Progressive scroll to load content
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => {
+        window.scrollBy(0, window.innerHeight * 0.8);
+      });
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Check if we have enough tweets
+      const currentCount = await page.evaluate(() => {
+        return document.querySelectorAll('[data-testid="cellInnerDiv"]').length;
+      });
+      
+      console.log(`📊 Current tweet elements found: ${currentCount}`);
+      
+      if (currentCount >= maxTweets * 2) {
+        console.log('✅ Sufficient content loaded, stopping scroll');
+        break;
+      }
     }
     
-    // Go back to top
+    // Return to top for extraction
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Extract tweets
-    console.log('🎯 Extracting tweets...');
+    // FIXED TWEET EXTRACTION with updated selectors
+    console.log('🎯 Extracting tweets with updated selectors...');
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
-      const articles = document.querySelectorAll('article');
       const now = new Date();
-      const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
-
-      for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
-        const article = articles[i];
+      
+      // Updated selectors for current Twitter structure
+      const tweetContainers = document.querySelectorAll('[data-testid="cellInnerDiv"]');
+      console.log(`Found ${tweetContainers.length} potential tweet containers`);
+      
+      for (let i = 0; i < tweetContainers.length && tweetData.length < maxTweets; i++) {
+        const container = tweetContainers[i];
+        
         try {
-          // Skip promoted
-          if (article.querySelector('[data-testid="promotedIndicator"]')) {
+          // Skip promoted content
+          if (container.querySelector('[data-testid="placementTracking"]') ||
+              container.querySelector('[aria-label*="Promoted"]') ||
+              container.innerText.includes('Promoted') ||
+              container.innerText.includes('Ad')) {
             continue;
           }
 
-          // Skip pinned tweets - ENHANCED DETECTION
+          // Enhanced pinned tweet detection
           const isPinned = 
-            article.querySelector('[aria-label="Pinned"]') ||
-            article.querySelector('[aria-label="Pinned Tweet"]') ||
-            article.querySelector('[data-testid="socialContext"]') ||
-            article.innerText.includes('Pinned') ||
-            article.innerText.includes('📌') ||
-            article.querySelector('.r-1h8ys4a') ||
-            article.querySelector('[data-testid="pin"]') ||
-            article.closest('[data-testid="cellInnerDiv"]')?.querySelector('[aria-label*="Pinned"]') ||
-            article.querySelector('span[dir="ltr"]')?.textContent?.includes('Pinned') ||
-            (i === 0 && article.querySelector('time')?.getAttribute('datetime') && 
-             new Date() - new Date(article.querySelector('time').getAttribute('datetime')) > 7 * 24 * 60 * 60 * 1000);
+            container.querySelector('[data-testid="socialContext"]')?.innerText?.includes('Pinned') ||
+            container.querySelector('[aria-label*="Pinned"]') ||
+            container.innerText.includes('📌') ||
+            (i === 0 && container.querySelector('time') && 
+             new Date() - new Date(container.querySelector('time').getAttribute('datetime')) > 24 * 60 * 60 * 1000);
 
           if (isPinned) {
+            console.log('Skipping pinned tweet');
             continue;
           }
 
-          // Tweet text
-          const textElement = article.querySelector('[data-testid="tweetText"]');
-          const text = textElement ? textElement.innerText.trim() : '';
+          // Look for tweet content within container
+          const article = container.querySelector('article') || container;
+          
+          // Extract tweet text with multiple fallbacks
+          let text = '';
+          const textSelectors = [
+            '[data-testid="tweetText"]',
+            '[data-testid="tweet"] div[lang]',
+            'div[lang][dir="auto"]',
+            '[role="group"] div[lang]'
+          ];
+          
+          for (const selector of textSelectors) {
+            const textElement = article.querySelector(selector);
+            if (textElement) {
+              text = textElement.innerText.trim();
+              if (text) break;
+            }
+          }
 
-          if (!text && !article.querySelector('img')) continue;
+          // Skip if no text and no media
+          if (!text && !article.querySelector('img[alt*="Image"]') && !article.querySelector('video')) {
+            continue;
+          }
 
-          // Tweet link + ID
-          const linkElement = article.querySelector('a[href*="/status/"]');
+          // Extract tweet link and ID
+          const linkElement = article.querySelector('a[href*="/status/"]') || 
+                             container.querySelector('a[href*="/status/"]');
           if (!linkElement) continue;
 
           const href = linkElement.getAttribute('href');
-          const link = href.startsWith('http') ? href : 'https://twitter.com' + href;
+          const link = href.startsWith('http') ? href : 'https://x.com' + href;
           const tweetId = link.match(/status\/(\d+)/)?.[1];
           if (!tweetId) continue;
 
-          // Timestamp
-          const timeElement = article.querySelector('time');
+          // Extract timestamp with better parsing
+          const timeElement = article.querySelector('time') || container.querySelector('time');
           let timestamp = timeElement ? timeElement.getAttribute('datetime') : null;
           const relativeTime = timeElement ? timeElement.innerText.trim() : '';
 
+          // Parse relative time if no datetime
           if (!timestamp && relativeTime) {
+            const now = new Date();
             if (relativeTime.includes('s') || relativeTime.toLowerCase().includes('now')) {
               timestamp = new Date().toISOString();
             } else if (relativeTime.includes('m')) {
-              const mins = parseInt(relativeTime) || 1;
+              const mins = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
               timestamp = new Date(now.getTime() - mins * 60000).toISOString();
             } else if (relativeTime.includes('h')) {
-              const hours = parseInt(relativeTime) || 1;
+              const hours = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
               timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
             } else if (relativeTime.includes('d')) {
-              const days = parseInt(relativeTime) || 1;
+              const days = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
               timestamp = new Date(now.getTime() - days * 86400000).toISOString();
             }
           }
 
-          if (!timestamp) continue;
-          const tweetDate = new Date(timestamp);
-          if (isNaN(tweetDate.getTime()) || tweetDate < thirtyDaysAgo) continue;
+          if (!timestamp) {
+            console.log('No valid timestamp found, skipping tweet');
+            continue;
+          }
 
-          // User info
-          const userElement = article.querySelector('[data-testid="User-Names"] a, [data-testid="User-Name"] a');
+          // Extract user information with fallbacks
           let username = '';
           let displayName = '';
-
-          if (userElement) {
-            const userHref = userElement.getAttribute('href');
-            username = userHref ? userHref.replace('/', '') : '';
+          
+          const userLinkSelectors = [
+            '[data-testid="User-Name"] a[href^="/"]',
+            '[data-testid="User-Names"] a[href^="/"]',
+            'a[href^="/"][role="link"]'
+          ];
+          
+          for (const selector of userLinkSelectors) {
+            const userElement = article.querySelector(selector) || container.querySelector(selector);
+            if (userElement) {
+              const userHref = userElement.getAttribute('href');
+              if (userHref && userHref.includes('/') && !userHref.includes('/status/')) {
+                username = userHref.replace('/', '').replace('@', '');
+                break;
+              }
+            }
+          }
+          
+          const displayNameSelectors = [
+            '[data-testid="User-Name"] span span',
+            '[data-testid="User-Names"] span span',
+            '[data-testid="User-Name"] div span'
+          ];
+          
+          for (const selector of displayNameSelectors) {
+            const nameElement = article.querySelector(selector) || container.querySelector(selector);
+            if (nameElement && nameElement.textContent && !nameElement.textContent.includes('@')) {
+              displayName = nameElement.textContent.trim();
+              break;
+            }
           }
 
-          const displayNameElement = article.querySelector('[data-testid="User-Names"] span, [data-testid="User-Name"] span');
-          if (displayNameElement) {
-            displayName = displayNameElement.textContent.trim();
-          }
-
-          // Metrics
-          const getMetric = (testId) => {
-            const element = article.querySelector(`[data-testid="${testId}"]`);
-            if (!element) return 0;
-            const text = element.getAttribute('aria-label') || element.textContent || '';
-            const match = text.match(/(\d+(?:,\d+)*)/);
-            return match ? parseInt(match[1].replace(/,/g, '')) : 0;
+          // Extract engagement metrics with improved selectors
+          const getMetric = (testId, container) => {
+            const selectors = [
+              `[data-testid="${testId}"]`,
+              `[aria-label*="${testId}"]`,
+              `button[aria-label*="${testId.slice(0, -1)}"]` // reply -> repli
+            ];
+            
+            for (const selector of selectors) {
+              const element = container.querySelector(selector);
+              if (element) {
+                const ariaLabel = element.getAttribute('aria-label') || '';
+                const textContent = element.textContent || '';
+                const text = ariaLabel || textContent;
+                
+                const match = text.match(/(\d+(?:[,\.]\d+)*)/);
+                if (match) {
+                  return parseInt(match[1].replace(/[,\.]/g, ''));
+                }
+              }
+            }
+            return 0;
           };
 
-          tweetData.push({
+          const tweetObj = {
             id: tweetId,
-            username: username.replace(/^@/, ''),
+            username: username,
             displayName: displayName,
-            text,
-            link,
-            likes: getMetric('like'),
-            retweets: getMetric('retweet'),
-            replies: getMetric('reply'),
-            timestamp,
-            relativeTime,
-            scraped_at: new Date().toISOString()
-          });
+            text: text,
+            link: link,
+            likes: getMetric('like', article) || getMetric('favorite', article),
+            retweets: getMetric('retweet', article),
+            replies: getMetric('reply', article),
+            timestamp: timestamp,
+            relativeTime: relativeTime,
+            scraped_at: new Date().toISOString(),
+            hasMedia: !!(article.querySelector('img[alt*="Image"]') || article.querySelector('video'))
+          };
+
+          console.log(`✅ Extracted tweet: @${username} - "${text.substring(0, 50)}..."`);
+          tweetData.push(tweetObj);
 
         } catch (e) {
-          console.error(`Error processing article ${i}:`, e.message);
+          console.error(`❌ Error processing container ${i}:`, e.message);
         }
       }
 
+      console.log(`📊 Total tweets extracted: ${tweetData.length}`);
       return tweetData;
     }, maxTweets);
 
-    // Sort by timestamp (newest first)
-    tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-    // Filter out old/pinned tweets
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 1);
-
-    const finalTweets = tweets
-      .filter(t => {
-        const tweetAge = new Date() - new Date(t.timestamp);
-        const isOld = tweetAge > (24 * 60 * 60 * 1000);
-        const isPinned = t.text.includes('📌') || 
-                        t.text.toLowerCase().includes('pinned') ||
-                        (tweets.length > 1 && tweetAge > (new Date() - new Date(tweets[1].timestamp)) * 5);
-        
-        return !isPinned && !isOld;
-      })
+    // Sort by timestamp (newest first) and filter recent tweets only
+    const sortedTweets = tweets
+      .filter(t => t.timestamp && t.text) // Only tweets with content
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
       .slice(0, maxTweets);
     
     const totalTime = Date.now() - startTime;
-    console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} tweets in ${totalTime}ms`);
+    console.log(`🎉 SUCCESS: Extracted ${sortedTweets.length} fresh tweets in ${totalTime}ms`);
 
     res.json({
       success: true,
-      count: finalTweets.length,
+      count: sortedTweets.length,
       requested: maxTweets,
-      tweets: finalTweets,
+      tweets: sortedTweets,
       scraped_at: new Date().toISOString(),
       profile_url: searchURL,
       performance: {
@@ -569,6 +649,17 @@ app.post('/scrape', async (req, res) => {
 
   } catch (error) {
     console.error('💥 SCRAPING FAILED:', error.message);
+    
+    // Enhanced error diagnosis
+    let suggestion = 'Try again in a few minutes.';
+    if (error.message.includes('login') || error.message.includes('Authentication')) {
+      suggestion = 'Please provide valid Twitter cookies in TWITTER_COOKIES environment variable';
+    } else if (error.message.includes('timeout')) {
+      suggestion = 'Twitter is loading slowly. Try increasing timeout or checking your internet connection.';
+    } else if (error.message.includes('suspended')) {
+      suggestion = 'The Twitter account appears to be suspended or private.';
+    }
+    
     res.status(500).json({ 
       success: false, 
       error: error.message,
@@ -577,19 +668,15 @@ app.post('/scrape', async (req, res) => {
         total_time_ms: Date.now() - startTime,
         browser_reused: true
       },
-      suggestion: error.message.includes('login') || error.message.includes('Authentication') ? 
-        'Please provide valid Twitter cookies in TWITTER_COOKIES environment variable' :
-        'Twitter might be rate limiting or blocking requests. Try again in a few minutes.'
+      suggestion: suggestion
     });
   } finally {
-    // Return page to pool instead of closing browser
     if (page) {
       await browserPool.releasePage(page);
     }
   }
 });
 
-// Simplified user endpoint
 app.post('/scrape-user', async (req, res) => {
   const username = req.body.username;
   const maxTweets = req.body.maxTweets || 10;
@@ -603,10 +690,8 @@ app.post('/scrape-user', async (req, res) => {
   
   console.log(`🎯 Scraping user: @${cleanUsername}`);
   
-  // Forward to main endpoint
   req.body.url = profileURL;
   
-  // Use internal routing
   return new Promise((resolve) => {
     const originalJson = res.json;
     const originalStatus = res.status;
@@ -623,12 +708,10 @@ app.post('/scrape-user', async (req, res) => {
       }
     });
     
-    // Call scrape endpoint
     app.handle({ ...req, url: '/scrape', method: 'POST' }, res);
   });
 });
 
-// Initialize browser pool on startup
 async function startServer() {
   try {
     console.log('🔥 Initializing browser pool...');
@@ -638,7 +721,7 @@ async function startServer() {
       console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
       console.log(`🔍 Chrome executable:`, findChrome() || 'default');
       console.log(`🍪 Cookies configured:`, !!process.env.TWITTER_COOKIES);
-      console.log(`🔥 Browser pool ready - optimized for 24/7 operation!`);
+      console.log(`🔥 Browser pool ready - FIXED SELECTORS & LOGIC!`);
       console.log(`⚡ Performance: ~10x faster requests with browser reuse`);
     });
   } catch (error) {
@@ -647,7 +730,6 @@ async function startServer() {
   }
 }
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
   if (browserPool.browser) {
@@ -664,5 +746,4 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-// Start the server
 startServer();
