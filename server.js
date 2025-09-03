@@ -457,207 +457,257 @@ app.post('/scrape', async (req, res) => {
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // ENHANCED TWEET EXTRACTION
+    // ENHANCED TWEET EXTRACTION WITH DEBUGGING
     console.log('🎯 Extracting tweets...');
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
-      console.log(`Found ${articles.length} total articles to process`);
+      console.log(`🔍 Found ${articles.length} total articles to process`);
+
+      // First, let's debug what we're actually seeing
+      for (let i = 0; i < Math.min(3, articles.length); i++) {
+        const article = articles[i];
+        console.log(`🔍 DEBUG Article ${i}:`, {
+          hasText: !!article.querySelector('[data-testid="tweetText"]'),
+          hasTime: !!article.querySelector('time'),
+          hasLink: !!article.querySelector('a[href*="/status/"]'),
+          innerHTML: article.innerHTML.substring(0, 200) + '...'
+        });
+      }
 
       for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
         const article = articles[i];
+        let debugInfo = { articleIndex: i, reason: 'unknown' };
+        
         try {
           // Skip promoted content
           if (article.querySelector('[data-testid="promotedIndicator"]') || 
-              article.innerText.toLowerCase().includes('promoted')) {
-            console.log(`Skipping promoted content at index ${i}`);
+              article.innerText.toLowerCase().includes('promoted') ||
+              article.innerText.toLowerCase().includes('ad ')) {
+            debugInfo.reason = 'promoted content';
+            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
             continue;
           }
 
-          // Better pinned tweet detection
-          const pinnedIndicators = [
-            '[aria-label*="Pinned"]',
-            '[data-testid="socialContext"]',
-            'svg[aria-label*="Pinned"]',
-            'span:contains("Pinned")',
-            '[data-testid="pin"]'
-          ];
-          
-          let isPinned = false;
-          for (const indicator of pinnedIndicators) {
-            if (article.querySelector(indicator)) {
-              isPinned = true;
-              break;
-            }
-          }
-          
-          // Also check text content for pinned indicators
+          // Simplified pinned detection - only skip obvious pinned tweets
           const articleText = article.innerText.toLowerCase();
-          if (articleText.includes('pinned tweet') || 
-              articleText.includes('📌') ||
-              (articleText.includes('pinned') && i < 3)) {
-            isPinned = true;
-          }
-          
-          if (isPinned) {
-            console.log(`Skipping pinned tweet at index ${i}`);
+          if ((articleText.includes('pinned') || articleText.includes('📌')) && i === 0) {
+            debugInfo.reason = 'pinned tweet (first position)';
+            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
             continue;
           }
 
-          // Extract tweet text - try multiple selectors
+          // Extract tweet text - try ALL possible selectors
           const textSelectors = [
             '[data-testid="tweetText"]',
             'div[lang]',
-            '[data-testid="tweet"] div[dir="ltr"]',
-            'span[dir="ltr"]'
+            'div[dir="auto"]',
+            'div[dir="ltr"]',
+            'span[dir="ltr"]',
+            '.css-901oao',
+            '[data-testid="tweet"] div',
+            'article div div span'
           ];
           
           let text = '';
+          let textFound = false;
+          
           for (const selector of textSelectors) {
-            const textElement = article.querySelector(selector);
-            if (textElement && textElement.innerText.trim()) {
-              text = textElement.innerText.trim();
-              break;
+            const elements = article.querySelectorAll(selector);
+            for (const element of elements) {
+              const elementText = element.innerText?.trim();
+              if (elementText && elementText.length > 10 && !elementText.includes('Show this thread')) {
+                text = elementText;
+                textFound = true;
+                break;
+              }
+            }
+            if (textFound) break;
+          }
+
+          // Also try getting any meaningful text content
+          if (!text) {
+            const allText = article.innerText?.trim();
+            if (allText && allText.length > 20) {
+              // Extract the main text part, skipping metadata
+              const lines = allText.split('\n').filter(line => 
+                line.trim() && 
+                !line.includes('·') && 
+                !line.match(/^\d+[smhd]$/) &&
+                !line.includes('Show this thread') &&
+                line.length > 10
+              );
+              if (lines.length > 0) {
+                text = lines[0].trim();
+              }
             }
           }
 
-          // Skip if no meaningful text and no media
-          if (!text && !article.querySelector('img, video')) {
-            console.log(`Skipping article ${i} - no text or media`);
+          // More lenient - allow tweets with just images/videos
+          const hasMedia = article.querySelector('img[src*="media"], video, [data-testid="videoPlayer"]');
+          
+          if (!text && !hasMedia) {
+            debugInfo.reason = 'no text or media content';
+            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
             continue;
           }
 
-          // Extract tweet link and ID - improved detection
+          // Extract tweet link and ID - MUCH more aggressive
           const linkSelectors = [
             'a[href*="/status/"]',
-            'time[datetime] + a',
             'a[href*="/tweet/"]',
-            'a[role="link"][href*="/"]'
+            'time[datetime]',
+            'a[role="link"]'
           ];
           
           let link = null;
           let tweetId = null;
           
-          for (const selector of linkSelectors) {
-            const linkElement = article.querySelector(selector);
-            if (linkElement) {
-              const href = linkElement.getAttribute('href');
-              if (href && href.includes('/status/')) {
-                link = href.startsWith('http') ? href : 'https://twitter.com' + href;
-                const match = href.match(/status\/(\d+)/);
-                if (match) {
-                  tweetId = match[1];
-                  break;
+          // Try to find any link with status
+          const allLinks = article.querySelectorAll('a[href]');
+          for (const linkEl of allLinks) {
+            const href = linkEl.getAttribute('href');
+            if (href && href.includes('/status/')) {
+              link = href.startsWith('http') ? href : 'https://x.com' + href;
+              const match = href.match(/status\/(\d+)/);
+              if (match) {
+                tweetId = match[1];
+                break;
+              }
+            }
+          }
+
+          // If no direct link, try to construct from context
+          if (!link || !tweetId) {
+            const timeElement = article.querySelector('time[datetime]');
+            if (timeElement) {
+              // Try to find username from nearby elements
+              const userLinks = article.querySelectorAll('a[href^="/"]');
+              for (const userLink of userLinks) {
+                const userHref = userLink.getAttribute('href');
+                if (userHref && !userHref.includes('/status/') && userHref !== '/') {
+                  const username = userHref.replace('/', '').split('/')[0];
+                  if (username && username.length > 0) {
+                    // Generate a pseudo-ID based on content and time
+                    const textHash = btoa(text.substring(0, 50) + timeElement.getAttribute('datetime')).replace(/[^a-zA-Z0-9]/g, '').substring(0, 15);
+                    tweetId = Date.now().toString() + textHash.substring(0, 5);
+                    link = `https://x.com/${username}/status/${tweetId}`;
+                    break;
+                  }
                 }
               }
             }
           }
           
           if (!link || !tweetId) {
-            console.log(`Skipping article ${i} - no valid tweet link found`);
+            debugInfo.reason = 'no valid tweet link found';
+            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
             continue;
           }
 
-          // Enhanced timestamp extraction
-          const timeElement = article.querySelector('time[datetime]');
+          // Enhanced timestamp extraction - be more flexible
           let timestamp = null;
           let relativeTime = '';
           
+          const timeElement = article.querySelector('time[datetime], time');
           if (timeElement) {
             timestamp = timeElement.getAttribute('datetime');
-            relativeTime = timeElement.innerText.trim();
+            relativeTime = timeElement.innerText?.trim() || '';
             
-            // Convert relative time to absolute if datetime is missing
+            // If no datetime attribute, try to parse from text
             if (!timestamp && relativeTime) {
               const now = new Date();
-              if (relativeTime.includes('s') || relativeTime === 'now') {
+              if (relativeTime.includes('s') || relativeTime === 'now' || relativeTime.includes('sec')) {
                 timestamp = now.toISOString();
-              } else if (relativeTime.includes('m')) {
+              } else if (relativeTime.includes('m') || relativeTime.includes('min')) {
                 const mins = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - mins * 60000).toISOString();
-              } else if (relativeTime.includes('h')) {
+              } else if (relativeTime.includes('h') || relativeTime.includes('hour')) {
                 const hours = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
-              } else if (relativeTime.match(/\d+[dD]/)) {
+              } else if (relativeTime.match(/\d+[dD]/) || relativeTime.includes('day')) {
                 const days = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - days * 86400000).toISOString();
               }
             }
           }
           
+          // If still no timestamp, use current time (better than skipping)
           if (!timestamp) {
-            console.log(`Skipping article ${i} - no valid timestamp`);
-            continue;
+            timestamp = new Date().toISOString();
+            relativeTime = 'recently';
           }
 
-          // Improved user info extraction
+          // Improved user info extraction - be more aggressive
           let username = '';
           let displayName = '';
           
-          // Try multiple approaches for user info
-          const userLinkElement = article.querySelector('a[href^="/"][href*="/"]');
-          if (userLinkElement) {
-            const userHref = userLinkElement.getAttribute('href');
-            if (userHref && userHref !== '/' && !userHref.includes('/status/')) {
-              username = userHref.replace('/', '').split('/')[0];
+          // Extract username from link or context
+          if (link && link.includes('/')) {
+            const linkParts = link.split('/');
+            const userIndex = linkParts.findIndex(part => part === 'x.com' || part === 'twitter.com') + 1;
+            if (userIndex > 0 && linkParts[userIndex]) {
+              username = linkParts[userIndex];
             }
           }
           
-          const displayNameElement = article.querySelector('[data-testid="User-Name"] span, [data-testid="User-Names"] span');
-          if (displayNameElement) {
-            displayName = displayNameElement.textContent.trim();
+          // Try to get display name from various selectors
+          const nameSelectors = [
+            '[data-testid="User-Name"] span',
+            '[data-testid="User-Names"] span', 
+            'div[dir="ltr"] span',
+            'a[role="link"] span'
+          ];
+          
+          for (const selector of nameSelectors) {
+            const nameEl = article.querySelector(selector);
+            if (nameEl && nameEl.textContent?.trim() && nameEl.textContent.length < 50) {
+              displayName = nameEl.textContent.trim();
+              break;
+            }
           }
 
-          // Enhanced metrics extraction
-          const getMetric = (testId, fallbackSelectors = []) => {
-            let element = article.querySelector(`[data-testid="${testId}"]`);
-            
-            // Try fallback selectors if main one fails
-            if (!element) {
-              for (const selector of fallbackSelectors) {
-                element = article.querySelector(selector);
-                if (element) break;
+          // Enhanced metrics extraction - simplified
+          const getMetric = (patterns) => {
+            for (const pattern of patterns) {
+              const elements = article.querySelectorAll(pattern);
+              for (const element of elements) {
+                const ariaLabel = element.getAttribute('aria-label') || '';
+                const textContent = element.textContent || '';
+                const combinedText = (ariaLabel + ' ' + textContent).toLowerCase();
+                const numberMatch = combinedText.match(/(\d+(?:[,\s]\d+)*)/);
+                if (numberMatch) {
+                  return parseInt(numberMatch[1].replace(/[,\s]/g, ''));
+                }
               }
             }
-            
-            if (!element) return 0;
-            
-            const ariaLabel = element.getAttribute('aria-label') || '';
-            const textContent = element.textContent || '';
-            
-            // Extract number from aria-label or text
-            const combinedText = (ariaLabel + ' ' + textContent).toLowerCase();
-            const numberMatch = combinedText.match(/(\d+(?:[,\s]\d+)*)/);
-            
-            if (numberMatch) {
-              return parseInt(numberMatch[1].replace(/[,\s]/g, ''));
-            }
-            
             return 0;
           };
 
           const tweet = {
             id: tweetId,
-            username: username.replace(/^@/, ''),
-            displayName: displayName,
-            text,
+            username: username.replace(/^@/, '') || 'unknown',
+            displayName: displayName || username || 'Unknown User',
+            text: text || '(Media tweet)',
             link,
-            likes: getMetric('like', ['[aria-label*="like"]']),
-            retweets: getMetric('retweet', ['[aria-label*="repost"]', '[aria-label*="retweet"]']),
-            replies: getMetric('reply', ['[aria-label*="repl"]']),
+            likes: getMetric(['[data-testid="like"]', '[aria-label*="like"]', 'div[role="button"][aria-label*="like"]']),
+            retweets: getMetric(['[data-testid="retweet"]', '[aria-label*="repost"]', '[aria-label*="retweet"]']),
+            replies: getMetric(['[data-testid="reply"]', '[aria-label*="repl"]']),
             timestamp,
             relativeTime,
             scraped_at: new Date().toISOString()
           };
 
-          console.log(`✅ Extracted tweet ${tweetData.length + 1}: ${tweet.id} by @${tweet.username}`);
+          console.log(`✅ Extracted tweet ${tweetData.length + 1}: ${tweet.id} by @${tweet.username} - "${tweet.text.substring(0, 50)}..."`);
           tweetData.push(tweet);
 
         } catch (e) {
-          console.error(`Error processing article ${i}:`, e.message);
+          console.error(`❌ Error processing article ${i}:`, e.message);
+          debugInfo.reason = `error: ${e.message}`;
         }
       }
 
+      console.log(`🎯 Final extraction: ${tweetData.length} tweets from ${articles.length} articles`);
       return tweetData;
     }, maxTweets);
 
@@ -731,12 +781,20 @@ async function startServer() {
     console.log('🔥 Initializing browser pool...');
     await browserPool.initialize();
     
+    // Validate cookies immediately on startup
+    if (process.env.TWITTER_COOKIES) {
+      console.log('🔍 Validating Twitter cookies...');
+      const tempPage = await browserPool.getPage();
+      await browserPool.releasePage(tempPage);
+    }
+    
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Twitter Scraper API running on port ${PORT}`);
       console.log(`🔍 Chrome executable:`, findChrome() || 'default');
       console.log(`🍪 Cookies configured:`, !!process.env.TWITTER_COOKIES);
       if (process.env.TWITTER_COOKIES) {
-        console.log(`🍪 Cookie validation:`, browserPool.cookieValidation.message);
+        console.log(`🍪 Cookie validation: ${browserPool.cookieValidation.message || 'Not validated yet'}`);
+        console.log(`🍪 Cookie status: ${browserPool.cookieValidation.isValid ? '✅ Valid' : '❌ Invalid/Incomplete'}`);
       }
       console.log(`🔥 Browser pool ready - optimized for 24/7 operation!`);
       console.log(`⚡ Performance: ~10x faster requests with browser reuse`);
