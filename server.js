@@ -333,7 +333,7 @@ app.post('/restart-browser', async (req, res) => {
   }
 });
 
-// IMPROVED SCRAPE ENDPOINT
+// IMPROVED SCRAPE ENDPOINT - FOCUSED ON FRESH TWEETS
 app.post('/scrape', async (req, res) => {
   const searchURL = req.body.url || process.env.TWITTER_SEARCH_URL;
   const maxTweets = req.body.maxTweets || 10;
@@ -434,103 +434,77 @@ app.post('/scrape', async (req, res) => {
       throw new Error(`❌ No tweet content found. Page may have loaded incorrectly.`);
     }
 
-    // Wait for content to stabilize
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    // Improved scrolling strategy
-    console.log('📍 Scrolling to load fresh content...');
+    // Focus on top of page for freshest tweets
+    console.log('📍 Ensuring we start from the very top for freshest tweets...');
     await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // More aggressive refresh to get latest content
+    console.log('🔄 Refreshing page to ensure latest tweets...');
+    await page.reload({ waitUntil: 'networkidle0' });
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Smart scrolling to load more tweets
-    for (let i = 0; i < 4; i++) {
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.8));
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Check if we have enough tweets
-      const tweetCount = await page.$$eval('article', articles => articles.length);
-      console.log(`🔄 Scroll ${i + 1}: Found ${tweetCount} articles`);
-      if (tweetCount >= maxTweets * 2) break;
+    // Minimal scrolling - just enough to trigger fresh content load
+    console.log('📍 Light scrolling to load fresh content...');
+    for (let i = 0; i < 2; i++) {
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.5));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    // Return to top for extraction
+    // Return to absolute top
     await page.evaluate(() => window.scrollTo(0, 0));
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // ENHANCED TWEET EXTRACTION WITH DEBUGGING
-    console.log('🎯 Extracting tweets...');
+    // ENHANCED TWEET EXTRACTION - PRIORITIZE NEWEST FIRST
+    console.log('🎯 Extracting fresh tweets from top of timeline...');
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       console.log(`🔍 Found ${articles.length} total articles to process`);
 
-      // First, let's debug what we're actually seeing
-      for (let i = 0; i < Math.min(3, articles.length); i++) {
-        const article = articles[i];
-        console.log(`🔍 DEBUG Article ${i}:`, {
-          hasText: !!article.querySelector('[data-testid="tweetText"]'),
-          hasTime: !!article.querySelector('time'),
-          hasLink: !!article.querySelector('a[href*="/status/"]'),
-          innerHTML: article.innerHTML.substring(0, 200) + '...'
-        });
-      }
-
+      // Process articles in order (newest first on timeline)
       for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
         const article = articles[i];
-        let debugInfo = { articleIndex: i, reason: 'unknown' };
         
         try {
           // Skip promoted content
           if (article.querySelector('[data-testid="promotedIndicator"]') || 
               article.innerText.toLowerCase().includes('promoted') ||
               article.innerText.toLowerCase().includes('ad ')) {
-            debugInfo.reason = 'promoted content';
-            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
+            console.log(`❌ Skipping article ${i}: promoted content`);
             continue;
           }
 
-          // Simplified pinned detection - only skip obvious pinned tweets
+          // Skip pinned tweets only if it's the very first tweet
           const articleText = article.innerText.toLowerCase();
-          if ((articleText.includes('pinned') || articleText.includes('📌')) && i === 0) {
-            debugInfo.reason = 'pinned tweet (first position)';
-            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
+          if (i === 0 && (articleText.includes('pinned') || articleText.includes('📌'))) {
+            console.log(`❌ Skipping article ${i}: pinned tweet`);
             continue;
           }
 
-          // Extract tweet text - try ALL possible selectors
+          // Extract tweet text with priority on main content
           const textSelectors = [
             '[data-testid="tweetText"]',
             'div[lang]',
             'div[dir="auto"]',
             'div[dir="ltr"]',
-            'span[dir="ltr"]',
-            '.css-901oao',
-            '[data-testid="tweet"] div',
-            'article div div span'
+            'span[dir="ltr"]'
           ];
           
           let text = '';
-          let textFound = false;
-          
           for (const selector of textSelectors) {
-            const elements = article.querySelectorAll(selector);
-            for (const element of elements) {
-              const elementText = element.innerText?.trim();
-              if (elementText && elementText.length > 10 && !elementText.includes('Show this thread')) {
-                text = elementText;
-                textFound = true;
-                break;
-              }
+            const element = article.querySelector(selector);
+            if (element && element.innerText?.trim() && element.innerText.trim().length > 5) {
+              text = element.innerText.trim();
+              break;
             }
-            if (textFound) break;
           }
 
-          // Also try getting any meaningful text content
+          // Fallback: extract from article text content
           if (!text) {
-            const allText = article.innerText?.trim();
-            if (allText && allText.length > 20) {
-              // Extract the main text part, skipping metadata
-              const lines = allText.split('\n').filter(line => 
+            const fullText = article.innerText?.trim();
+            if (fullText) {
+              const lines = fullText.split('\n').filter(line => 
                 line.trim() && 
                 !line.includes('·') && 
                 !line.match(/^\d+[smhd]$/) &&
@@ -543,29 +517,20 @@ app.post('/scrape', async (req, res) => {
             }
           }
 
-          // More lenient - allow tweets with just images/videos
+          // Check for media content
           const hasMedia = article.querySelector('img[src*="media"], video, [data-testid="videoPlayer"]');
           
           if (!text && !hasMedia) {
-            debugInfo.reason = 'no text or media content';
-            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
+            console.log(`❌ Skipping article ${i}: no content found`);
             continue;
           }
 
-          // Extract tweet link and ID - MUCH more aggressive
-          const linkSelectors = [
-            'a[href*="/status/"]',
-            'a[href*="/tweet/"]',
-            'time[datetime]',
-            'a[role="link"]'
-          ];
-          
+          // Extract tweet link and ID
           let link = null;
           let tweetId = null;
           
-          // Try to find any link with status
-          const allLinks = article.querySelectorAll('a[href]');
-          for (const linkEl of allLinks) {
+          const statusLinks = article.querySelectorAll('a[href*="/status/"]');
+          for (const linkEl of statusLinks) {
             const href = linkEl.getAttribute('href');
             if (href && href.includes('/status/')) {
               link = href.startsWith('http') ? href : 'https://x.com' + href;
@@ -576,36 +541,13 @@ app.post('/scrape', async (req, res) => {
               }
             }
           }
-
-          // If no direct link, try to construct from context
-          if (!link || !tweetId) {
-            const timeElement = article.querySelector('time[datetime]');
-            if (timeElement) {
-              // Try to find username from nearby elements
-              const userLinks = article.querySelectorAll('a[href^="/"]');
-              for (const userLink of userLinks) {
-                const userHref = userLink.getAttribute('href');
-                if (userHref && !userHref.includes('/status/') && userHref !== '/') {
-                  const username = userHref.replace('/', '').split('/')[0];
-                  if (username && username.length > 0) {
-                    // Generate a pseudo-ID based on content and time
-                    const textHash = btoa(text.substring(0, 50) + timeElement.getAttribute('datetime')).replace(/[^a-zA-Z0-9]/g, '').substring(0, 15);
-                    tweetId = Date.now().toString() + textHash.substring(0, 5);
-                    link = `https://x.com/${username}/status/${tweetId}`;
-                    break;
-                  }
-                }
-              }
-            }
-          }
           
           if (!link || !tweetId) {
-            debugInfo.reason = 'no valid tweet link found';
-            console.log(`❌ Skipping article ${i}: ${debugInfo.reason}`);
+            console.log(`❌ Skipping article ${i}: no valid tweet link found`);
             continue;
           }
 
-          // Enhanced timestamp extraction - be more flexible
+          // Enhanced timestamp extraction - prioritize recent tweets
           let timestamp = null;
           let relativeTime = '';
           
@@ -614,35 +556,33 @@ app.post('/scrape', async (req, res) => {
             timestamp = timeElement.getAttribute('datetime');
             relativeTime = timeElement.innerText?.trim() || '';
             
-            // If no datetime attribute, try to parse from text
+            // Parse relative time to actual timestamp
             if (!timestamp && relativeTime) {
               const now = new Date();
-              if (relativeTime.includes('s') || relativeTime === 'now' || relativeTime.includes('sec')) {
+              if (relativeTime.includes('s') || relativeTime === 'now') {
                 timestamp = now.toISOString();
-              } else if (relativeTime.includes('m') || relativeTime.includes('min')) {
+              } else if (relativeTime.includes('m')) {
                 const mins = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - mins * 60000).toISOString();
-              } else if (relativeTime.includes('h') || relativeTime.includes('hour')) {
+              } else if (relativeTime.includes('h')) {
                 const hours = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
-              } else if (relativeTime.match(/\d+[dD]/) || relativeTime.includes('day')) {
+              } else if (relativeTime.includes('d')) {
                 const days = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
                 timestamp = new Date(now.getTime() - days * 86400000).toISOString();
               }
             }
           }
           
-          // If still no timestamp, use current time (better than skipping)
           if (!timestamp) {
             timestamp = new Date().toISOString();
-            relativeTime = 'recently';
+            relativeTime = 'now';
           }
 
-          // Improved user info extraction - be more aggressive
+          // Extract user info
           let username = '';
           let displayName = '';
           
-          // Extract username from link or context
           if (link && link.includes('/')) {
             const linkParts = link.split('/');
             const userIndex = linkParts.findIndex(part => part === 'x.com' || part === 'twitter.com') + 1;
@@ -651,12 +591,10 @@ app.post('/scrape', async (req, res) => {
             }
           }
           
-          // Try to get display name from various selectors
           const nameSelectors = [
             '[data-testid="User-Name"] span',
             '[data-testid="User-Names"] span', 
-            'div[dir="ltr"] span',
-            'a[role="link"] span'
+            'div[dir="ltr"] span'
           ];
           
           for (const selector of nameSelectors) {
@@ -667,7 +605,7 @@ app.post('/scrape', async (req, res) => {
             }
           }
 
-          // Enhanced metrics extraction - simplified
+          // Extract metrics
           const getMetric = (patterns) => {
             for (const pattern of patterns) {
               const elements = article.querySelectorAll(pattern);
@@ -690,20 +628,19 @@ app.post('/scrape', async (req, res) => {
             displayName: displayName || username || 'Unknown User',
             text: text || '(Media tweet)',
             link,
-            likes: getMetric(['[data-testid="like"]', '[aria-label*="like"]', 'div[role="button"][aria-label*="like"]']),
-            retweets: getMetric(['[data-testid="retweet"]', '[aria-label*="repost"]', '[aria-label*="retweet"]']),
+            likes: getMetric(['[data-testid="like"]', '[aria-label*="like"]']),
+            retweets: getMetric(['[data-testid="retweet"]', '[aria-label*="repost"]']),
             replies: getMetric(['[data-testid="reply"]', '[aria-label*="repl"]']),
             timestamp,
             relativeTime,
             scraped_at: new Date().toISOString()
           };
 
-          console.log(`✅ Extracted tweet ${tweetData.length + 1}: ${tweet.id} by @${tweet.username} - "${tweet.text.substring(0, 50)}..."`);
+          console.log(`✅ Extracted tweet ${tweetData.length + 1}: ${tweet.id} by @${tweet.username} - "${tweet.text.substring(0, 50)}..." (${tweet.relativeTime})`);
           tweetData.push(tweet);
 
         } catch (e) {
           console.error(`❌ Error processing article ${i}:`, e.message);
-          debugInfo.reason = `error: ${e.message}`;
         }
       }
 
@@ -711,22 +648,23 @@ app.post('/scrape', async (req, res) => {
       return tweetData;
     }, maxTweets);
 
-    // Sort by timestamp (newest first) and apply minimal filtering
+    // Sort by timestamp (newest first) - keep the natural timeline order
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    // Only filter out very old tweets (older than 30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    // Take only the freshest tweets within the last 7 days for better results
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
     const finalTweets = tweets
       .filter(t => {
         const tweetDate = new Date(t.timestamp);
-        return tweetDate > thirtyDaysAgo;
+        // Prioritize very recent tweets, but don't be too restrictive
+        return tweetDate > sevenDaysAgo || t.relativeTime.includes('s') || t.relativeTime.includes('m') || t.relativeTime.includes('h');
       })
       .slice(0, maxTweets);
     
     const totalTime = Date.now() - startTime;
-    console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} tweets in ${totalTime}ms`);
+    console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} fresh tweets in ${totalTime}ms`);
 
     res.json({
       success: true,
@@ -796,7 +734,7 @@ async function startServer() {
         console.log(`🍪 Cookie validation: ${browserPool.cookieValidation.message || 'Not validated yet'}`);
         console.log(`🍪 Cookie status: ${browserPool.cookieValidation.isValid ? '✅ Valid' : '❌ Invalid/Incomplete'}`);
       }
-      console.log(`🔥 Browser pool ready - optimized for 24/7 operation!`);
+      console.log(`🔥 Browser pool ready - optimized for FRESH tweets!`);
       console.log(`⚡ Performance: ~10x faster requests with browser reuse`);
     });
   } catch (error) {
