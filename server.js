@@ -28,14 +28,11 @@ class BrowserPool {
   // Helper method to handle timeout across different Puppeteer versions
   async waitForTimeout(page, ms) {
     try {
-      // Try new method first
       if (page.waitForTimeout) {
         await page.waitForTimeout(ms);
       } else if (page.waitFor) {
-        // Fallback to old method
         await page.waitFor(ms);
       } else {
-        // Manual timeout as last resort
         await new Promise(resolve => setTimeout(resolve, ms));
       }
     } catch (error) {
@@ -207,23 +204,19 @@ class BrowserPool {
         console.warn('Initial navigation warning:', e.message);
       }
 
-      // Normalize cookies: ensure cookie objects have url or domain; if not, set url to https://x.com
       const normalized = validCookies.map(c => {
         const copy = Object.assign({}, c);
         if (!copy.url && !copy.domain) {
           copy.url = 'https://x.com';
         }
-        // remove sameSite if it's invalid for puppeteer
         if (copy.sameSite && typeof copy.sameSite === 'string') {
           copy.sameSite = copy.sameSite.toLowerCase();
         }
         return copy;
       });
 
-      // set cookies
       await page.setCookie(...normalized);
 
-      // Quick validation: ensure essential cookie names exist
       const essentialCookieNames = ['auth_token', 'ct0', 'twid'];
       const foundEssential = essentialCookieNames.some(name =>
         normalized.find(cookie => cookie.name === name)
@@ -365,6 +358,46 @@ app.post('/restart-browser', async (req, res) => {
 });
 
 /**
+ * Helpers to get username robustly
+ */
+
+// Returns username if URL is like https://x.com/<username> (and not a reserved route)
+function usernameFromProfile(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length !== 1) return null; // Only /<username>
+    const candidate = parts[0].toLowerCase();
+
+    const reserved = new Set([
+      'home','i','explore','notifications','messages','settings','tos',
+      'privacy','terms','search','compose','download','topics','lists',
+      'bookmarks','communities','help','about'
+    ]);
+
+    if (reserved.has(candidate)) return null;
+    return parts[0];
+  } catch {
+    return null;
+  }
+}
+
+// Extracts username from q param like q=from:podha_protocol or encoded
+function usernameFromSearchQuery(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    const q = u.searchParams.get('q');
+    if (!q) return null;
+    const decoded = decodeURIComponent(q);
+    // Look for from:USERNAME (USERNAME can include underscores, digits)
+    const m = decoded.match(/\bfrom:([A-Za-z0-9_]{1,30})\b/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * SCRAPE endpoint - focused on freshest tweets with FIXED timeout issues
  */
 app.post('/scrape', async (req, res) => {
@@ -375,15 +408,10 @@ app.post('/scrape', async (req, res) => {
 
   if (!originalURL) return res.status(400).json({ error: 'No Twitter URL provided' });
 
-  // helper to extract username from profile URL: https://x.com/username
-  const usernameFromProfile = (url) => {
-    try {
-      const u = new URL(url);
-      const parts = u.pathname.split('/').filter(Boolean);
-      if (parts.length === 1) return parts[0];
-      return null;
-    } catch (e) { return null; }
-  };
+  // Robust username extraction
+  const profileCandidate = usernameFromProfile(originalURL);
+  const searchCandidate = usernameFromSearchQuery(originalURL);
+  const resolvedUsername = profileCandidate || searchCandidate || null;
 
   let page;
   const startTime = Date.now();
@@ -393,7 +421,6 @@ app.post('/scrape', async (req, res) => {
 
     await page.bringToFront().catch(()=>{});
     let targetURL = originalURL;
-    const profileUsername = usernameFromProfile(originalURL);
 
     // utility: attempt to click a "Latest" tab/button if present (robust search by text)
     async function clickLatestIfExists() {
@@ -407,7 +434,6 @@ app.post('/scrape', async (req, res) => {
               n.click();
               return true;
             }
-            // localized / small variations
             if (t === 'latest tweets' || t === 'show latest') {
               n.click();
               return true;
@@ -436,10 +462,9 @@ app.post('/scrape', async (req, res) => {
       console.log(`🔁 Attempt ${attempt} to load freshest timeline at ${targetURL}`);
 
       try {
-        // navigate (domcontentloaded for SPA friendliness)
         await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.setExtraHTTPHeaders({ 'pragma': 'no-cache', 'cache-control': 'no-cache' }).catch(()=>{});
-        
+
         // clear client caches in page context (may noop if not available)
         await page.evaluate(() => {
           try { 
@@ -449,27 +474,26 @@ app.post('/scrape', async (req, res) => {
           } catch (e) {}
         }).catch(()=>{});
 
-        // wait briefly for tweet nodes to appear
+        // wait for feed skeleton or any article
         const tweetSelector = 'article[data-testid="tweet"], article[role="article"]';
         try {
-          await page.waitForSelector(tweetSelector, { timeout: 12000 });
+          await page.waitForSelector(tweetSelector, { timeout: 15000 });
         } catch (e) {
-          console.log('⏳ tweet nodes not ready yet, will reload/scroll');
+          console.log('⏳ tweet nodes not ready yet, will wiggle/scroll');
         }
 
-        // try to click "Latest" if available
         await clickLatestIfExists();
 
         // wiggle scroll to trigger dynamic fetch
         await page.evaluate(() => { 
           window.scrollTo(0, 0); 
-          window.scrollBy(0, 150); 
+          window.scrollBy(0, 300);
           window.scrollTo(0, 0); 
         });
-        await browserPool.waitForTimeout(page, 1000);
+        await browserPool.waitForTimeout(page, 1200);
 
-        // try a light reload (domcontentloaded)
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+        // light reload
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 });
         await browserPool.waitForTimeout(page, 1200);
 
         // read top-most tweet timestamp (if exists)
@@ -492,38 +516,40 @@ app.post('/scrape', async (req, res) => {
             break;
           } else {
             console.log('✳️ Top tweet too old; will retry (or fallback to live-search)');
-            // small wait then retry
-            await browserPool.waitForTimeout(page, 800);
+            await browserPool.waitForTimeout(page, 900);
             continue;
           }
         } else {
           console.log('⚠️ No time element on top article; retrying/scrolling');
-          await browserPool.waitForTimeout(page, 800);
+          await browserPool.waitForTimeout(page, 900);
           continue;
         }
 
       } catch (error) {
         console.error(`💥 Attempt ${attempt} failed:`, error.message);
         if (attempt === maxAttempts) {
-          throw error;
+          break; // exit attempts loop; consider fallback
         }
-        await browserPool.waitForTimeout(page, 1000);
+        await browserPool.waitForTimeout(page, 1200);
       }
     } // end attempts loop
 
-    // If still not fresh and we have a profile username, switch to the live-search URL
-    if (!navigationSuccess && profileUsername) {
-      const searchLive = `https://x.com/search?q=from%3A${encodeURIComponent(profileUsername)}&f=live`;
+    // If still not fresh, and we have a username, switch to the live-search URL
+    if (!navigationSuccess && resolvedUsername) {
+      const searchLive = `https://x.com/search?q=${encodeURIComponent('from:' + resolvedUsername)}&f=live`;
       console.log('🔄 Falling back to search=f=live URL:', searchLive);
       targetURL = searchLive;
 
       await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForSelector('article[data-testid="tweet"], article[role="article"]', { timeout: 15000 }).catch(()=>{});
-      await browserPool.waitForTimeout(page, 900);
+      await page.waitForSelector('article[data-testid="tweet"], article[role="article"]', { timeout: 20000 }).catch(()=>{});
+      await browserPool.waitForTimeout(page, 1000);
     }
 
     // FINAL extraction (newest first)
-    console.log('🎯 Extracting tweets from page:', await page.url().catch(()=>'(urlfail)'));
+    let currentUrl = '(urlfail)';
+    try { currentUrl = page.url(); } catch {}
+    console.log('🎯 Extracting tweets from page:', currentUrl);
+
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article[role="article"]'));
