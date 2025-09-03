@@ -651,17 +651,25 @@ app.post('/scrape', async (req, res) => {
     // Sort by timestamp (newest first) - keep the natural timeline order
     tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    // Take only the freshest tweets within the last 7 days for better results
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    // Take fresh tweets from last 24 hours primarily, then extend to 3 days
+    const oneDayAgo = new Date();
+    oneDayAgo.setDate(oneDayAgo.getDate() - 1);
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-    const finalTweets = tweets
-      .filter(t => {
-        const tweetDate = new Date(t.timestamp);
-        // Prioritize very recent tweets, but don't be too restrictive
-        return tweetDate > sevenDaysAgo || t.relativeTime.includes('s') || t.relativeTime.includes('m') || t.relativeTime.includes('h');
-      })
-      .slice(0, maxTweets);
+    const freshTweets = tweets.filter(t => {
+      const tweetDate = new Date(t.timestamp);
+      return tweetDate > oneDayAgo || 
+             t.relativeTime.includes('s') || 
+             t.relativeTime.includes('m') || 
+             t.relativeTime.includes('h') ||
+             (tweetDate > threeDaysAgo && (t.relativeTime.includes('1d') || t.relativeTime.includes('2d')));
+    });
+
+    // If we don't have enough fresh tweets, include more recent ones
+    const finalTweets = freshTweets.length >= maxTweets ? 
+                       freshTweets.slice(0, maxTweets) : 
+                       tweets.slice(0, maxTweets);
     
     const totalTime = Date.now() - startTime;
     console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} fresh tweets in ${totalTime}ms`);
