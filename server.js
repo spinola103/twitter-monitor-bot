@@ -25,6 +25,25 @@ class BrowserPool {
     setInterval(() => this.healthCheck(), 5 * 60 * 1000);
   }
 
+  // Helper method to handle timeout across different Puppeteer versions
+  async waitForTimeout(page, ms) {
+    try {
+      // Try new method first
+      if (page.waitForTimeout) {
+        await page.waitForTimeout(ms);
+      } else if (page.waitFor) {
+        // Fallback to old method
+        await page.waitFor(ms);
+      } else {
+        // Manual timeout as last resort
+        await new Promise(resolve => setTimeout(resolve, ms));
+      }
+    } catch (error) {
+      console.warn(`Timeout method failed, using manual timeout: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, ms));
+    }
+  }
+
   async initialize() {
     if (this.isInitializing) {
       console.log('⏳ Browser initialization already in progress...');
@@ -185,7 +204,7 @@ class BrowserPool {
       try {
         await page.goto('https://x.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
       } catch (e) {
-        // not fatal, continue
+        console.warn('Initial navigation warning:', e.message);
       }
 
       // Normalize cookies: ensure cookie objects have url or domain; if not, set url to https://x.com
@@ -346,14 +365,8 @@ app.post('/restart-browser', async (req, res) => {
 });
 
 /**
- * SCRAPE endpoint - focused on freshest tweets
- *
- * Improvements:
- * - Retry loop that checks the top-most article timestamp and forces reload/scrolls
- * - Prefer article[data-testid="tweet"] and better waiting
- * - Cookie loading is done on page creation (loaded earlier)
+ * SCRAPE endpoint - focused on freshest tweets with FIXED timeout issues
  */
-// ------------------- REPLACE your existing /scrape handler with this -------------------
 app.post('/scrape', async (req, res) => {
   const originalURL = req.body.url || process.env.TWITTER_SEARCH_URL;
   const maxTweets = req.body.maxTweets || 10;
@@ -404,7 +417,7 @@ app.post('/scrape', async (req, res) => {
         });
         if (clicked) {
           console.log('🖱️ Clicked "Latest" tab/button');
-          await page.waitForTimeout(1200);
+          await browserPool.waitForTimeout(page, 1200);
         }
         return clicked;
       } catch (e) {
@@ -422,58 +435,79 @@ app.post('/scrape', async (req, res) => {
       attempt++;
       console.log(`🔁 Attempt ${attempt} to load freshest timeline at ${targetURL}`);
 
-      // navigate (domcontentloaded for SPA friendliness)
-      await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => console.warn('goto warning', e?.message));
-      await page.setExtraHTTPHeaders({ 'pragma': 'no-cache', 'cache-control': 'no-cache' }).catch(()=>{});
-      // clear client caches in page context (may noop if not available)
-      await page.evaluate(() => {
-        try { if (window.caches) { caches.keys().then(keys => keys.forEach(k => caches.delete(k))); } } catch (e) {}
-      }).catch(()=>{});
-
-      // wait briefly for tweet nodes to appear
-      const tweetSelector = 'article[data-testid="tweet"], article[role="article"]';
       try {
-        await page.waitForSelector(tweetSelector, { timeout: 12000 });
-      } catch (e) {
-        console.log('⏳ tweet nodes not ready yet, will reload/scroll');
-      }
+        // navigate (domcontentloaded for SPA friendliness)
+        await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.setExtraHTTPHeaders({ 'pragma': 'no-cache', 'cache-control': 'no-cache' }).catch(()=>{});
+        
+        // clear client caches in page context (may noop if not available)
+        await page.evaluate(() => {
+          try { 
+            if (window.caches) { 
+              caches.keys().then(keys => keys.forEach(k => caches.delete(k))); 
+            } 
+          } catch (e) {}
+        }).catch(()=>{});
 
-      // try to click "Latest" if available
-      await clickLatestIfExists();
+        // wait briefly for tweet nodes to appear
+        const tweetSelector = 'article[data-testid="tweet"], article[role="article"]';
+        try {
+          await page.waitForSelector(tweetSelector, { timeout: 12000 });
+        } catch (e) {
+          console.log('⏳ tweet nodes not ready yet, will reload/scroll');
+        }
 
-      // wiggle scroll to trigger dynamic fetch
-      await page.evaluate(() => { window.scrollTo(0, 0); window.scrollBy(0, 150); window.scrollTo(0, 0); });
-      await page.waitForTimeout(1000);
+        // try to click "Latest" if available
+        await clickLatestIfExists();
 
-      // try a light reload (domcontentloaded)
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-      await page.waitForTimeout(1200);
+        // wiggle scroll to trigger dynamic fetch
+        await page.evaluate(() => { 
+          window.scrollTo(0, 0); 
+          window.scrollBy(0, 150); 
+          window.scrollTo(0, 0); 
+        });
+        await browserPool.waitForTimeout(page, 1000);
 
-      // read top-most tweet timestamp (if exists)
-      const topInfo = await page.evaluate(() => {
-        const first = document.querySelector('article[data-testid="tweet"], article[role="article"]');
-        if (!first) return null;
-        const timeEl = first.querySelector('time[datetime], time');
-        return timeEl ? { iso: timeEl.getAttribute('datetime') || null, text: timeEl.innerText || '' } : null;
-      });
+        // try a light reload (domcontentloaded)
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+        await browserPool.waitForTimeout(page, 1200);
 
-      if (topInfo && topInfo.iso) {
-        topTimestampISO = topInfo.iso;
-        const ageHours = (Date.now() - new Date(topTimestampISO).getTime()) / (1000*60*60);
-        console.log(`🔎 Top tweet timestamp: ${topTimestampISO} (age: ${ageHours.toFixed(2)} hours)`);
-        if (ageHours <= freshWindowHours) {
-          navigationSuccess = true;
-          break;
+        // read top-most tweet timestamp (if exists)
+        const topInfo = await page.evaluate(() => {
+          const first = document.querySelector('article[data-testid="tweet"], article[role="article"]');
+          if (!first) return null;
+          const timeEl = first.querySelector('time[datetime], time');
+          return timeEl ? { 
+            iso: timeEl.getAttribute('datetime') || null, 
+            text: timeEl.innerText || '' 
+          } : null;
+        });
+
+        if (topInfo && topInfo.iso) {
+          topTimestampISO = topInfo.iso;
+          const ageHours = (Date.now() - new Date(topTimestampISO).getTime()) / (1000*60*60);
+          console.log(`🔎 Top tweet timestamp: ${topTimestampISO} (age: ${ageHours.toFixed(2)} hours)`);
+          if (ageHours <= freshWindowHours) {
+            navigationSuccess = true;
+            break;
+          } else {
+            console.log('✳️ Top tweet too old; will retry (or fallback to live-search)');
+            // small wait then retry
+            await browserPool.waitForTimeout(page, 800);
+            continue;
+          }
         } else {
-          console.log('✳️ Top tweet too old; will retry (or fallback to live-search)');
-          // small wait then retry
-          await page.waitForTimeout(800);
+          console.log('⚠️ No time element on top article; retrying/scrolling');
+          await browserPool.waitForTimeout(page, 800);
           continue;
         }
-      } else {
-        console.log('⚠️ No time element on top article; retrying/scrolling');
-        await page.waitForTimeout(800);
-        continue;
+
+      } catch (error) {
+        console.error(`💥 Attempt ${attempt} failed:`, error.message);
+        if (attempt === maxAttempts) {
+          throw error;
+        }
+        await browserPool.waitForTimeout(page, 1000);
       }
     } // end attempts loop
 
@@ -483,9 +517,9 @@ app.post('/scrape', async (req, res) => {
       console.log('🔄 Falling back to search=f=live URL:', searchLive);
       targetURL = searchLive;
 
-      await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await page.goto(targetURL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForSelector('article[data-testid="tweet"], article[role="article"]', { timeout: 15000 }).catch(()=>{});
-      await page.waitForTimeout(900);
+      await browserPool.waitForTimeout(page, 900);
     }
 
     // FINAL extraction (newest first)
@@ -493,62 +527,94 @@ app.post('/scrape', async (req, res) => {
     const tweets = await page.evaluate((maxTweets) => {
       const tweetData = [];
       const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article[role="article"]'));
+      
       for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
         const article = articles[i];
         try {
           // skip promos
-          if (article.innerText.toLowerCase().includes('promoted') || article.querySelector('[data-testid="placementTracking"]')) continue;
+          if (article.innerText.toLowerCase().includes('promoted') || 
+              article.querySelector('[data-testid="placementTracking"]')) {
+            continue;
+          }
 
-          // text
-          const textSel = ['[data-testid="tweetText"]','div[lang]','div[dir="auto"]','span[dir="ltr"]'];
+          // text extraction with better fallbacks
+          const textSelectors = [
+            '[data-testid="tweetText"]',
+            'div[lang]',
+            'div[dir="auto"]',
+            'span[dir="ltr"]'
+          ];
+          
           let text = '';
-          for (const s of textSel) {
-            const el = article.querySelector(s);
-            if (el && el.innerText && el.innerText.trim().length > 5) { text = el.innerText.trim(); break; }
+          for (const selector of textSelectors) {
+            const el = article.querySelector(selector);
+            if (el && el.innerText && el.innerText.trim().length > 5) { 
+              text = el.innerText.trim(); 
+              break; 
+            }
           }
+          
           if (!text) {
-            const lines = (article.innerText||'').split('\n').map(l=>l.trim()).filter(l=>l && l.length>5 && !/^\d+[smhd]$/.test(l));
-            if (lines.length) text = lines.join(' / ').slice(0,1000);
+            const lines = (article.innerText || '')
+              .split('\n')
+              .map(l => l.trim())
+              .filter(l => l && l.length > 5 && !/^\d+[smhd]$/.test(l));
+            if (lines.length) {
+              text = lines.join(' / ').slice(0, 1000);
+            }
           }
+          
           const hasMedia = !!article.querySelector('img[src*="media"], video, [data-testid="videoPlayer"]');
           if (!text && !hasMedia) continue;
 
-          // link & id
-          let link=null, id=null;
+          // link & id extraction
+          let link = null, id = null;
           const anchors = Array.from(article.querySelectorAll('a[href*="/status/"]'));
           for (const a of anchors) {
             const href = a.getAttribute('href');
             if (href && href.includes('/status/')) {
-              link = href.startsWith('http') ? href : 'https://x.com'+href;
-              const m = href.match(/status\/(\d+)/);
-              if (m) { id = m[1]; break; }
+              link = href.startsWith('http') ? href : 'https://x.com' + href;
+              const match = href.match(/status\/(\d+)/);
+              if (match) { 
+                id = match[1]; 
+                break; 
+              }
             }
           }
           if (!link || !id) continue;
 
-          // time
-          const tEl = article.querySelector('time[datetime], time');
-          const ts = tEl ? (tEl.getAttribute('datetime') || new Date().toISOString()) : new Date().toISOString();
+          // timestamp extraction
+          const timeEl = article.querySelector('time[datetime], time');
+          const timestamp = timeEl ? 
+            (timeEl.getAttribute('datetime') || new Date().toISOString()) : 
+            new Date().toISOString();
 
-          // username/display
-          let username='unknown', display='unknown';
+          // username/display name extraction
+          let username = 'unknown', displayName = 'unknown';
           try {
             const parts = link.split('/');
-            if (parts.length>=4) username = parts[3].replace(/^@/,'') || username;
-          } catch(e){}
+            if (parts.length >= 4) {
+              username = parts[3].replace(/^@/, '') || username;
+            }
+          } catch(e) {}
+          
           const nameEl = article.querySelector('[data-testid="User-Name"] span, [data-testid="User-Names"] span, div[dir="ltr"] span');
-          if (nameEl && nameEl.textContent) display = nameEl.textContent.trim();
+          if (nameEl && nameEl.textContent) {
+            displayName = nameEl.textContent.trim();
+          }
 
-          // metrics extract helper
+          // metrics extraction helper
           const getMetric = (patterns) => {
-            for (const p of patterns) {
-              const els = article.querySelectorAll(p);
-              for (const el of els) {
-                const ar = el.getAttribute('aria-label') || '';
-                const txt = el.textContent || '';
-                const combined = (ar+' '+txt).toLowerCase();
-                const m = combined.match(/(\d+(?:[,\s]\d+)*)/);
-                if (m) return parseInt(m[1].replace(/[,\s]/g,''));
+            for (const pattern of patterns) {
+              const elements = article.querySelectorAll(pattern);
+              for (const el of elements) {
+                const ariaLabel = el.getAttribute('aria-label') || '';
+                const textContent = el.textContent || '';
+                const combined = (ariaLabel + ' ' + textContent).toLowerCase();
+                const match = combined.match(/(\d+(?:[,\s]\d+)*)/);
+                if (match) {
+                  return parseInt(match[1].replace(/[,\s]/g, ''), 10);
+                }
               }
             }
             return 0;
@@ -557,36 +623,44 @@ app.post('/scrape', async (req, res) => {
           tweetData.push({
             id,
             username,
-            displayName: display,
-            text: text || (hasMedia? '(media)' : ''),
+            displayName,
+            text: text || (hasMedia ? '(media)' : ''),
             link,
-            likes: getMetric(['[data-testid="like"]','[aria-label*="like"]']),
-            retweets: getMetric(['[data-testid="retweet"]','[aria-label*="repost"]']),
-            replies: getMetric(['[data-testid="reply"]','[aria-label*="repl"]']),
-            timestamp: ts,
-            relativeTime: (tEl ? (tEl.innerText||'') : ''),
+            likes: getMetric(['[data-testid="like"]', '[aria-label*="like"]']),
+            retweets: getMetric(['[data-testid="retweet"]', '[aria-label*="repost"]']),
+            replies: getMetric(['[data-testid="reply"]', '[aria-label*="repl"]']),
+            timestamp,
+            relativeTime: timeEl ? (timeEl.innerText || '') : '',
             scraped_at: new Date().toISOString()
           });
-        } catch (e) { /* swallow per-article errors */ }
+        } catch (e) { 
+          console.warn('Error processing article:', e.message);
+        }
       }
       return tweetData;
     }, maxTweets);
 
-    // sort newest-first and pick final slice
-    tweets.sort((a,b)=> new Date(b.timestamp) - new Date(a.timestamp));
+    // sort newest-first and apply freshness filter
+    tweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     const now = new Date();
-    const freshCut = new Date(now.getTime() - freshWindowHours*60*60*1000);
-    const fresh = tweets.filter(t => new Date(t.timestamp) > freshCut || /[smh]/i.test(t.relativeTime || '') );
-    const final = (fresh.length >= maxTweets) ? fresh.slice(0, maxTweets) : tweets.slice(0, maxTweets);
+    const freshCutoff = new Date(now.getTime() - freshWindowHours * 60 * 60 * 1000);
+    const freshTweets = tweets.filter(t => 
+      new Date(t.timestamp) > freshCutoff || 
+      /[smh]/i.test(t.relativeTime || '')
+    );
+    
+    const finalTweets = (freshTweets.length >= maxTweets) ? 
+      freshTweets.slice(0, maxTweets) : 
+      tweets.slice(0, maxTweets);
 
     const totalTime = Date.now() - startTime;
-    console.log(`🎉 SUCCESS: Extracted ${final.length} tweets in ${totalTime}ms`);
+    console.log(`🎉 SUCCESS: Extracted ${finalTweets.length} tweets in ${totalTime}ms`);
 
     res.json({
       success: true,
-      count: final.length,
+      count: finalTweets.length,
       requested: maxTweets,
-      tweets: final,
+      tweets: finalTweets,
       scraped_at: new Date().toISOString(),
       profile_url: originalURL,
       performance: { total_time_ms: totalTime, browser_reused: true },
@@ -608,8 +682,6 @@ app.post('/scrape', async (req, res) => {
     if (page) await browserPool.releasePage(page);
   }
 });
-// --------------------------------------------------------------------------------------
-
 
 // Initialize browser pool on startup
 async function startServer() {
@@ -617,11 +689,10 @@ async function startServer() {
     console.log('🔥 Initializing browser pool...');
     await browserPool.initialize();
 
-    // Validate cookies immediately on startup (improved: navigates before setting cookies)
+    // Validate cookies immediately on startup
     if (process.env.TWITTER_COOKIES) {
       console.log('🔍 Validating Twitter cookies...');
       const tempPage = await browserPool.getPage();
-      // loadCookies already tries goto('https://x.com')
       await browserPool.releasePage(tempPage);
     }
 
