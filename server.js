@@ -869,9 +869,9 @@ async function gracefulShutdown(signal) {
   console.log(`\n${signal} received, shutting down gracefully...`);
   
   try {
-    if (browserManager.browser) {
+    if (twitterBrowser.browser) {
       console.log('🔒 Closing browser...');
-      await browserManager.browser.close();
+      await twitterBrowser.browser.close();
     }
     console.log('✅ Shutdown completed');
     process.exit(0);
@@ -893,7 +893,7 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection:', reason);
+  console.error('💥 Unhandled Rejection:', promise, 'reason:', reason);
   gracefulShutdown('UNHANDLED_REJECTION');
 });
 
