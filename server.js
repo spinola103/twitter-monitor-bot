@@ -276,13 +276,101 @@ class TwitterScraperBrowser {
 // Global browser manager
 const browserManager = new TwitterScraperBrowser();
 
-// 🎯 CORE SINGLE ACCOUNT SCRAPER FUNCTION WITH FIXED DETECTION LOGIC
+// 🎯 IMPROVED DATE PARSING UTILITY
+function parseTwitterTimestamp(relativeTime, timeElement) {
+  const now = new Date();
+  
+  // First try to get absolute timestamp from datetime attribute
+  if (timeElement) {
+    const datetime = timeElement.getAttribute('datetime');
+    if (datetime) {
+      return new Date(datetime);
+    }
+  }
+  
+  if (!relativeTime) return now;
+  
+  const timeText = relativeTime.toLowerCase().trim();
+  
+  // Handle "now" or just posted
+  if (timeText.includes('now') || timeText === '' || timeText.includes('just now')) {
+    return now;
+  }
+  
+  // Parse relative time formats
+  const timeMatch = timeText.match(/(\d+)\s*([smhd])/);
+  if (timeMatch) {
+    const value = parseInt(timeMatch[1]);
+    const unit = timeMatch[2];
+    
+    switch (unit) {
+      case 's': // seconds
+        return new Date(now.getTime() - value * 1000);
+      case 'm': // minutes
+        return new Date(now.getTime() - value * 60 * 1000);
+      case 'h': // hours
+        return new Date(now.getTime() - value * 60 * 60 * 1000);
+      case 'd': // days
+        return new Date(now.getTime() - value * 24 * 60 * 60 * 1000);
+    }
+  }
+  
+  // Handle specific formats like "Aug 23", "Jun 26", etc.
+  const monthDayMatch = timeText.match(/([a-z]{3})\s+(\d+)/i);
+  if (monthDayMatch) {
+    const month = monthDayMatch[1];
+    const day = parseInt(monthDayMatch[2]);
+    const currentYear = now.getFullYear();
+    
+    const monthMap = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+    };
+    
+    const monthIndex = monthMap[month.toLowerCase()];
+    if (monthIndex !== undefined) {
+      const tweetDate = new Date(currentYear, monthIndex, day);
+      
+      // If the date is in the future, it's probably from last year
+      if (tweetDate > now) {
+        tweetDate.setFullYear(currentYear - 1);
+      }
+      
+      return tweetDate;
+    }
+  }
+  
+  // Handle full dates like "Dec 25, 2023"
+  const fullDateMatch = timeText.match(/([a-z]{3})\s+(\d+),?\s*(\d{4})?/i);
+  if (fullDateMatch) {
+    const month = fullDateMatch[1];
+    const day = parseInt(fullDateMatch[2]);
+    const year = fullDateMatch[3] ? parseInt(fullDateMatch[3]) : now.getFullYear();
+    
+    const monthMap = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+    };
+    
+    const monthIndex = monthMap[month.toLowerCase()];
+    if (monthIndex !== undefined) {
+      return new Date(year, monthIndex, day);
+    }
+  }
+  
+  // If we can't parse it, assume it's recent
+  console.log(`⚠️ Could not parse timestamp: "${relativeTime}", assuming recent`);
+  return now;
+}
+
+// 🎯 CORE SINGLE ACCOUNT SCRAPER FUNCTION WITH FIXED DATE FILTERING
 async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) {
   const scrapeId = crypto.randomBytes(6).toString('hex');
   const startTime = Date.now();
   const cleanUsername = username.replace('@', '');
   
   console.log(`\n🎯 [${scrapeId}] Starting scrape for @${cleanUsername}`);
+  console.log(`📅 Filtering tweets from last ${freshnessDays} days`);
   
   let page;
   try {
@@ -305,7 +393,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
     const currentUrl = page.url();
     console.log(`🔍 [${scrapeId}] Current URL: ${currentUrl}`);
     
-    // COMPLETELY REWRITTEN ERROR DETECTION LOGIC
+    // Page analysis for error detection
     const pageAnalysis = await page.evaluate((username) => {
       const analysis = {
         currentUrl: window.location.href,
@@ -322,14 +410,14 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
         debugInfo: []
       };
       
-      // Check for login redirect (most reliable)
+      // Check for login redirect
       if (analysis.currentUrl.includes('/login') || analysis.currentUrl.includes('/i/flow/login')) {
         analysis.hasLoginForm = true;
         analysis.debugInfo.push('Redirected to login page');
         return analysis;
       }
       
-      // Check for profile elements to see if we're on a profile page
+      // Check for profile elements
       const profileIndicators = [
         '[data-testid="UserName"]',
         '[data-testid="User-Names"]',
@@ -349,10 +437,9 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       analysis.articleCount = articles.length;
       analysis.debugInfo.push(`Found ${articles.length} article elements`);
       
-      // VERY SPECIFIC error message detection
+      // Error message detection
       const bodyText = analysis.bodyText;
       
-      // Rate limit - look for very specific messages
       const rateLimitIndicators = [
         'rate limit exceeded',
         'too many requests',
@@ -360,7 +447,6 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       ];
       analysis.hasRateLimitMessage = rateLimitIndicators.some(indicator => bodyText.includes(indicator));
       
-      // Suspension - ONLY if explicitly stated
       const suspensionIndicators = [
         'this account has been suspended',
         'account suspended for violating',
@@ -368,7 +454,6 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       ];
       analysis.hasSuspensionMessage = suspensionIndicators.some(indicator => bodyText.includes(indicator));
       
-      // Protected account - specific messages only
       const protectedIndicators = [
         'this account\'s tweets are protected',
         'these tweets are protected',
@@ -376,7 +461,6 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       ];
       analysis.hasProtectedMessage = protectedIndicators.some(indicator => bodyText.includes(indicator));
       
-      // Account not found - specific messages only
       const notFoundIndicators = [
         'this account doesn\'t exist',
         'sorry, that page doesn\'t exist',
@@ -384,7 +468,6 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       ];
       analysis.hasNotFoundMessage = notFoundIndicators.some(indicator => bodyText.includes(indicator));
       
-      // Add some key page text for debugging
       if (bodyText.length > 0) {
         analysis.debugInfo.push(`Page contains text: ${bodyText.substring(0, 200)}...`);
       }
@@ -406,7 +489,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       }
     });
     
-    // Act on the analysis with MUCH more specific logic
+    // Handle errors
     if (pageAnalysis.hasLoginForm) {
       throw new Error('Authentication required - redirected to login page');
     }
@@ -427,11 +510,9 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       throw new Error(`Account @${cleanUsername} is private/protected`);
     }
     
-    // If we have profile elements, we're good to continue even without articles yet
     if (!pageAnalysis.hasProfileElements) {
       console.log(`⚠️ [${scrapeId}] No profile elements found, checking for generic content...`);
       
-      // Final fallback check for any recognizable Twitter content
       const hasTwitterContent = await page.evaluate(() => {
         return document.querySelector('[data-testid]') || 
                document.querySelector('[aria-label]') ||
@@ -444,7 +525,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       }
     }
     
-    // Try to wait for tweet content with multiple strategies
+    // Wait for tweet content
     console.log(`⏳ [${scrapeId}] Waiting for tweet content to load...`);
     
     let tweetsFound = false;
@@ -455,7 +536,6 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       'div[data-testid="primaryColumn"] article'
     ];
     
-    // Try each selector with reasonable timeout
     for (const selector of tweetSelectors) {
       try {
         await page.waitForSelector(selector, { timeout: 8000 });
@@ -468,12 +548,10 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       }
     }
     
-    // If no tweets found but we have a valid profile, continue anyway
     if (!tweetsFound) {
       console.log(`📭 [${scrapeId}] No tweet elements found, but profile is valid`);
     }
 
-    // Allow more time for dynamic content
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Scroll to top for freshest content
@@ -487,19 +565,99 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    // Return to top
     await page.evaluate(() => window.scrollTo(0, 0));
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Extract tweets with comprehensive parsing
+    // Extract tweets with FIXED date filtering
     console.log(`🎯 [${scrapeId}] Extracting tweets...`);
     const tweets = await page.evaluate((username, maxTweets, scrapeId, freshnessDays) => {
+      // Inject the parseTwitterTimestamp function into the page context
+      function parseTwitterTimestamp(relativeTime, timeElement) {
+        const now = new Date();
+        
+        if (timeElement) {
+          const datetime = timeElement.getAttribute('datetime');
+          if (datetime) {
+            return new Date(datetime);
+          }
+        }
+        
+        if (!relativeTime) return now;
+        
+        const timeText = relativeTime.toLowerCase().trim();
+        
+        if (timeText.includes('now') || timeText === '' || timeText.includes('just now')) {
+          return now;
+        }
+        
+        const timeMatch = timeText.match(/(\d+)\s*([smhd])/);
+        if (timeMatch) {
+          const value = parseInt(timeMatch[1]);
+          const unit = timeMatch[2];
+          
+          switch (unit) {
+            case 's':
+              return new Date(now.getTime() - value * 1000);
+            case 'm':
+              return new Date(now.getTime() - value * 60 * 1000);
+            case 'h':
+              return new Date(now.getTime() - value * 60 * 60 * 1000);
+            case 'd':
+              return new Date(now.getTime() - value * 24 * 60 * 60 * 1000);
+          }
+        }
+        
+        const monthDayMatch = timeText.match(/([a-z]{3})\s+(\d+)/i);
+        if (monthDayMatch) {
+          const month = monthDayMatch[1];
+          const day = parseInt(monthDayMatch[2]);
+          const currentYear = now.getFullYear();
+          
+          const monthMap = {
+            jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+            jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+          };
+          
+          const monthIndex = monthMap[month.toLowerCase()];
+          if (monthIndex !== undefined) {
+            const tweetDate = new Date(currentYear, monthIndex, day);
+            
+            if (tweetDate > now) {
+              tweetDate.setFullYear(currentYear - 1);
+            }
+            
+            return tweetDate;
+          }
+        }
+        
+        const fullDateMatch = timeText.match(/([a-z]{3})\s+(\d+),?\s*(\d{4})?/i);
+        if (fullDateMatch) {
+          const month = fullDateMatch[1];
+          const day = parseInt(fullDateMatch[2]);
+          const year = fullDateMatch[3] ? parseInt(fullDateMatch[3]) : now.getFullYear();
+          
+          const monthMap = {
+            jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+            jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+          };
+          
+          const monthIndex = monthMap[month.toLowerCase()];
+          if (monthIndex !== undefined) {
+            return new Date(year, monthIndex, day);
+          }
+        }
+        
+        console.log(`⚠️ Could not parse timestamp: "${relativeTime}", assuming recent`);
+        return now;
+      }
+
       const tweetData = [];
       const articles = document.querySelectorAll('article');
       const now = new Date();
       const cutoffDate = new Date(now.getTime() - (freshnessDays * 24 * 60 * 60 * 1000));
 
       console.log(`Processing ${articles.length} articles for @${username}`);
+      console.log(`Cutoff date: ${cutoffDate.toISOString()}`);
 
       for (let i = 0; i < articles.length && tweetData.length < maxTweets; i++) {
         const article = articles[i];
@@ -508,23 +666,11 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
           // Skip promoted content
           if (article.querySelector('[data-testid="promotedIndicator"]') || 
               article.querySelector('[aria-label*="Promoted"]')) {
+            console.log(`Skipping promoted tweet at position ${i}`);
             continue;
           }
 
-          // Enhanced pinned tweet detection
-          const isPinned = (
-            article.querySelector('[data-testid="pin"]') ||
-            article.querySelector('svg[data-testid="pin"]') ||
-            article.querySelector('[aria-label*="Pinned"]') ||
-            article.textContent.toLowerCase().includes('pinned tweet')
-          );
-          
-          if (isPinned) {
-            console.log(`Skipping pinned tweet at position ${i}`);
-            continue;
-          }
-
-          // Extract tweet text with multiple strategies
+          // Extract tweet text
           let tweetText = '';
           const textSelectors = [
             '[data-testid="tweetText"]',
@@ -541,58 +687,78 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
             }
           }
           
-          // Skip if no meaningful text content and no media
+          // Check for media
           const hasMedia = article.querySelector('img[src*="pbs.twimg.com"]') || 
                            article.querySelector('video') ||
                            article.querySelector('[data-testid="gif"]');
           
-          if (!tweetText && !hasMedia) continue;
-          if (tweetText && tweetText.length < 3) continue;
+          // Skip if no meaningful content
+          if (!tweetText && !hasMedia) {
+            console.log(`Skipping tweet at position ${i} - no content`);
+            continue;
+          }
+          if (tweetText && tweetText.length < 3) {
+            console.log(`Skipping tweet at position ${i} - text too short`);
+            continue;
+          }
 
           // Get tweet link and ID
           const linkElement = article.querySelector('a[href*="/status/"]') || 
                              article.querySelector('time')?.closest('a');
-          if (!linkElement) continue;
+          if (!linkElement) {
+            console.log(`Skipping tweet at position ${i} - no link`);
+            continue;
+          }
           
           const href = linkElement.getAttribute('href');
           const tweetLink = href.startsWith('http') ? href : 'https://x.com' + href;
           const tweetIdMatch = tweetLink.match(/status\/(\d+)/);
-          if (!tweetIdMatch) continue;
+          if (!tweetIdMatch) {
+            console.log(`Skipping tweet at position ${i} - no ID`);
+            continue;
+          }
           
           const tweetId = tweetIdMatch[1];
 
-          // Enhanced timestamp extraction
+          // IMPROVED timestamp extraction and parsing
           const timeElement = article.querySelector('time');
-          let timestamp = timeElement ? timeElement.getAttribute('datetime') : null;
-          const relativeTime = timeElement ? timeElement.innerText.trim() : '';
+          let timestamp = null;
+          let relativeTime = '';
+          
+          if (timeElement) {
+            relativeTime = timeElement.innerText.trim();
+            timestamp = parseTwitterTimestamp(relativeTime, timeElement);
+          } else {
+            // Fallback if no time element found
+            timestamp = now;
+            relativeTime = 'now';
+          }
 
-          // Parse relative timestamps if no absolute time
-          if (!timestamp && relativeTime) {
-            const now = new Date();
-            
-            if (relativeTime.includes('s') || relativeTime.toLowerCase().includes('now')) {
-              timestamp = new Date().toISOString();
-            } else if (relativeTime.includes('m')) {
-              const minutes = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
-              timestamp = new Date(now.getTime() - minutes * 60000).toISOString();
-            } else if (relativeTime.includes('h')) {
-              const hours = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
-              timestamp = new Date(now.getTime() - hours * 3600000).toISOString();
-            } else if (relativeTime.includes('d')) {
-              const days = parseInt(relativeTime.match(/\d+/)?.[0]) || 1;
-              timestamp = new Date(now.getTime() - days * 86400000).toISOString();
+          // Enhanced pinned tweet detection - but only filter if outside date range
+          const isPinned = (
+            article.querySelector('[data-testid="pin"]') ||
+            article.querySelector('svg[data-testid="pin"]') ||
+            article.querySelector('[aria-label*="Pinned"]') ||
+            article.textContent.toLowerCase().includes('pinned tweet')
+          );
+          
+          console.log(`Tweet ${i}: ${relativeTime} -> ${timestamp.toISOString()}`);
+          
+          // Apply freshness filter - but include pinned tweets if they're reasonably recent
+          if (timestamp < cutoffDate) {
+            if (isPinned) {
+              // Allow pinned tweets that are up to 30 days old
+              const pinnedCutoff = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+              if (timestamp < pinnedCutoff) {
+                console.log(`Skipping old pinned tweet at position ${i}: ${timestamp.toISOString()}`);
+                continue;
+              }
+              console.log(`Including pinned tweet despite age: ${timestamp.toISOString()}`);
             } else {
-              // For older tweets, try to parse the text
-              timestamp = new Date().toISOString();
+              console.log(`Skipping old tweet at position ${i}: ${timestamp.toISOString()}`);
+              continue;
             }
           }
-
-          if (!timestamp) {
-            timestamp = new Date().toISOString(); // Fallback timestamp
-          }
-          
-          const tweetDate = new Date(timestamp);
-          if (isNaN(tweetDate.getTime()) || tweetDate < cutoffDate) continue;
 
           // Extract display name
           let displayName = username;
@@ -639,8 +805,9 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
             displayName,
             text: tweetText,
             link: tweetLink,
-            timestamp,
+            timestamp: timestamp.toISOString(),
             relativeTime,
+            isPinned,
             engagement: {
               likes: getMetric('like'),
               retweets: getMetric('retweet'), 
@@ -656,6 +823,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
             scraped_at: new Date().toISOString()
           };
           
+          console.log(`✅ Extracted tweet ${tweetData.length + 1}: ${relativeTime} - ${tweetText.substring(0, 50)}...`);
           tweetData.push(tweet);
 
         } catch (error) {
@@ -669,6 +837,10 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       );
       
       console.log(`Successfully extracted ${sortedTweets.length} tweets for @${username}`);
+      console.log(`Date range: ${sortedTweets.length > 0 ? 
+        `${sortedTweets[sortedTweets.length - 1].relativeTime} to ${sortedTweets[0].relativeTime}` : 
+        'No tweets found'}`);
+      
       return sortedTweets;
       
     }, cleanUsername, maxTweets, scrapeId, freshnessDays);
@@ -677,6 +849,10 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
     
     console.log(`\n🎉 [${scrapeId}] Scraping completed in ${totalTime}ms`);
     console.log(`📊 Extracted ${tweets.length} tweets for @${cleanUsername}`);
+    
+    if (tweets.length > 0) {
+      console.log(`📅 Date range: ${tweets[tweets.length - 1].relativeTime} to ${tweets[0].relativeTime}`);
+    }
 
     return {
       success: tweets.length > 0,
@@ -684,18 +860,26 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       tweets,
       count: tweets.length,
       requested: maxTweets,
+      freshness_days: freshnessDays,
+      date_range: tweets.length > 0 ? {
+        newest: tweets[0].relativeTime,
+        oldest: tweets[tweets.length - 1].relativeTime,
+        newest_timestamp: tweets[0].timestamp,
+        oldest_timestamp: tweets[tweets.length - 1].timestamp
+      } : null,
       performance: {
         scrape_time_ms: totalTime,
         instance_id: browserManager.instanceId
       },
       scraped_at: new Date().toISOString(),
-      analysis: pageAnalysis, // Include debug info
+      analysis: pageAnalysis,
       ...(tweets.length === 0 ? {
         warning: 'No recent tweets found within the specified timeframe',
         suggestions: [
-          'Try increasing freshnessDays parameter',
+          `Try increasing freshnessDays parameter (currently ${freshnessDays} days)`,
           'Account may have no recent activity',
-          'Try again in a few minutes if rate limited'
+          'Try again in a few minutes if rate limited',
+          'Check if account exists and is accessible'
         ]
       } : {})
     };
@@ -710,6 +894,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       error: error.message,
       tweets: [],
       count: 0,
+      freshness_days: freshnessDays,
       performance: {
         scrape_time_ms: totalTime,
         instance_id: browserManager.instanceId
@@ -718,7 +903,8 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
       suggestions: [
         'Check if Twitter cookies are properly configured',
         'Try again in a few minutes if rate limited',
-        'Verify the username is correct'
+        'Verify the username is correct',
+        `Try increasing freshnessDays beyond ${freshnessDays} days`
       ]
     };
   } finally {
@@ -736,50 +922,68 @@ app.get('/', (req, res) => {
   const stats = browserManager.getStats();
   
   res.json({
-    status: 'Enhanced Single Account Twitter Scraper v2.1',
-    version: '2.1.0',
+    status: 'Enhanced Single Account Twitter Scraper v2.2',
+    version: '2.2.0',
     chrome_executable: chromePath || 'default',
     browser_stats: stats,
     cookies_configured: !!process.env.TWITTER_COOKIES,
     timestamp: new Date().toISOString(),
     features: [
-      'Precise Error Detection',
+      'Fixed Date Filtering',
+      'Improved Timestamp Parsing',
+      'Pinned Tweet Handling',
       'Debug Analysis',
       'Cookie Support',
       'Rate Limit Protection',
       'Media Detection',
       'Engagement Metrics'
+    ],
+    improvements: [
+      'Fixed date filtering logic that was too aggressive',
+      'Better parsing of relative timestamps (Aug 23, Jun 26, etc.)',
+      'Smarter handling of pinned tweets',
+      'More detailed date range reporting',
+      'Enhanced debugging for timestamp issues'
     ]
   });
 });
 
 // Main scraping endpoint - by username
 app.post('/scrape', async (req, res) => {
-  const { username, maxTweets = 10, freshnessDays = 7 } = req.body;
+  const { username, maxTweets = 10, freshnessDays = 30 } = req.body; // Increased default to 30 days
   
   if (!username) {
     return res.status(400).json({ 
       success: false,
       error: 'Username is required',
-      example: { username: 'elonmusk', maxTweets: 10, freshnessDays: 7 }
+      example: { username: 'elonmusk', maxTweets: 10, freshnessDays: 30 }
     });
   }
 
+  // Validate freshnessDays
+  if (freshnessDays < 1 || freshnessDays > 365) {
+    return res.status(400).json({
+      success: false,
+      error: 'freshnessDays must be between 1 and 365',
+      provided: freshnessDays
+    });
+  }
+
+  console.log(`📝 Scrape request: @${username}, maxTweets: ${maxTweets}, freshnessDays: ${freshnessDays}`);
   const result = await scrapeSingleAccount(username, maxTweets, freshnessDays);
   
-  // Always return 200 for successful requests, let client decide based on success field
   res.json(result);
 });
 
 // Scrape by profile URL
 app.post('/scrape-url', async (req, res) => {
-  const { url, maxTweets = 10, freshnessDays = 7 } = req.body;
+  const { url, maxTweets = 10, freshnessDays = 30 } = req.body;
   
   if (!url) {
     return res.status(400).json({ 
       success: false,
       error: 'Twitter profile URL is required',
-      example: { url: 'https://x.com/elonmusk', maxTweets: 10 }
+      example: { url: 'https://x.com/elonmusk', maxTweets: 10, freshnessDays: 30 }
     });
   }
 
@@ -792,6 +996,7 @@ app.post('/scrape-url', async (req, res) => {
   }
 
   const username = usernameMatch[1];
+  console.log(`📝 URL scrape request: @${username} from ${url}`);
   const result = await scrapeSingleAccount(username, maxTweets, freshnessDays);
   
   res.json(result);
@@ -868,6 +1073,23 @@ app.post('/debug-page', async (req, res) => {
     
     // Get comprehensive page debug info
     const debugInfo = await page.evaluate(() => {
+      const articles = document.querySelectorAll('article');
+      const timestamps = [];
+      
+      // Extract timestamps from first few articles
+      for (let i = 0; i < Math.min(5, articles.length); i++) {
+        const timeElement = articles[i].querySelector('time');
+        if (timeElement) {
+          timestamps.push({
+            index: i,
+            datetime: timeElement.getAttribute('datetime'),
+            innerText: timeElement.innerText,
+            isPinned: !!(articles[i].querySelector('[data-testid="pin"]') || 
+                        articles[i].querySelector('svg[data-testid="pin"]'))
+          });
+        }
+      }
+      
       return {
         url: window.location.href,
         title: document.title,
@@ -876,8 +1098,10 @@ app.post('/debug-page', async (req, res) => {
           articles: document.querySelectorAll('article').length,
           tweetText: document.querySelectorAll('[data-testid="tweetText"]').length,
           userNames: document.querySelectorAll('[data-testid="User-Names"]').length,
-          userName: document.querySelectorAll('[data-testid="UserName"]').length
+          userName: document.querySelectorAll('[data-testid="UserName"]').length,
+          timeElements: document.querySelectorAll('time').length
         },
+        timestamps,
         firstArticleContent: (() => {
           const firstArticle = document.querySelector('article');
           return firstArticle ? firstArticle.innerText.substring(0, 200) : 'No articles found';
@@ -912,6 +1136,37 @@ app.post('/debug-page', async (req, res) => {
   }
 });
 
+// Test timestamp parsing endpoint
+app.post('/test-timestamp', (req, res) => {
+  const { timestamp } = req.body;
+  
+  if (!timestamp) {
+    return res.status(400).json({ error: 'timestamp is required' });
+  }
+  
+  try {
+    const parsed = parseTwitterTimestamp(timestamp, null);
+    const now = new Date();
+    const diffMs = now - parsed;
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+    
+    res.json({
+      input: timestamp,
+      parsed: parsed.toISOString(),
+      age_days: Math.round(diffDays * 100) / 100,
+      age_hours: Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100,
+      is_recent_7d: diffDays <= 7,
+      is_recent_30d: diffDays <= 30
+    });
+  } catch (error) {
+    res.json({
+      input: timestamp,
+      error: error.message,
+      parsed: null
+    });
+  }
+});
+
 // Initialize browser and start server
 async function startServer() {
   try {
@@ -919,7 +1174,7 @@ async function startServer() {
     await browserManager.initialize();
     
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`\n🚀 Enhanced Single Account Twitter Scraper v2.1 running on port ${PORT}`);
+      console.log(`\n🚀 Enhanced Single Account Twitter Scraper v2.2 running on port ${PORT}`);
       console.log(`🔍 Chrome: ${browserManager.findChrome() || 'default'}`);
       console.log(`🍪 Cookies: ${!!process.env.TWITTER_COOKIES ? 'configured' : 'not configured'}`);
       console.log(`🔥 Browser ready with ID: ${browserManager.instanceId}`);
@@ -930,27 +1185,30 @@ async function startServer() {
       console.log(`  POST /scrape        - Scrape by username`);
       console.log(`  POST /scrape-url    - Scrape by profile URL`);
       console.log(`  POST /debug-page    - Debug page content`);
+      console.log(`  POST /test-timestamp - Test timestamp parsing`);
       console.log(`  POST /restart-browser - Restart browser`);
       
       console.log(`\n📝 Usage Examples:`);
       console.log(`  POST /scrape`);
       console.log(`  {`);
-      console.log(`    "username": "elonmusk",`);
+      console.log(`    "username": "podha_protocol",`);
       console.log(`    "maxTweets": 10,`);
-      console.log(`    "freshnessDays": 7`);
+      console.log(`    "freshnessDays": 30`);
       console.log(`  }`);
       
-      console.log(`\n  POST /debug-page`);
+      console.log(`\n  POST /test-timestamp`);
       console.log(`  {`);
-      console.log(`    "username": "elonmusk"`);
+      console.log(`    "timestamp": "Aug 23"`);
       console.log(`  }`);
       
-      console.log(`\n🔧 Key Improvements in v2.1:`);
-      console.log(`  ✅ Completely rewritten error detection`);
-      console.log(`  ✅ Added comprehensive page analysis`);
-      console.log(`  ✅ Added debug endpoint for troubleshooting`);
-      console.log(`  ✅ More precise suspension/rate limit detection`);
-      console.log(`  ✅ Better fallback handling for edge cases`);
+      console.log(`\n🔧 Key Fixes in v2.2:`);
+      console.log(`  ✅ Fixed aggressive date filtering`);
+      console.log(`  ✅ Proper parsing of "Aug 23", "Jun 26" formats`);
+      console.log(`  ✅ Smart pinned tweet handling`);
+      console.log(`  ✅ Increased default freshnessDays to 30`);
+      console.log(`  ✅ Added timestamp testing endpoint`);
+      console.log(`  ✅ Better date range reporting`);
+      console.log(`  ✅ Enhanced debug information`);
     });
   } catch (error) {
     console.error('💥 Failed to start server:', error.message);
