@@ -276,7 +276,7 @@ class TwitterScraperBrowser {
 // Global browser manager
 const browserManager = new TwitterScraperBrowser();
 
-// 🎯 CORE SINGLE ACCOUNT SCRAPER FUNCTION
+// 🎯 CORE SINGLE ACCOUNT SCRAPER FUNCTION WITH FIXED DETECTION LOGIC
 async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) {
   const scrapeId = crypto.randomBytes(6).toString('hex');
   const startTime = Date.now();
@@ -299,62 +299,181 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
 
     console.log(`✅ [${scrapeId}] Navigation completed, status: ${response?.status()}`);
 
-    // Enhanced error detection
+    // Wait for page to fully load
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
     const currentUrl = page.url();
-    const pageContent = await page.content();
+    console.log(`🔍 [${scrapeId}] Current URL: ${currentUrl}`);
     
-    // Check for various error conditions
-    if (currentUrl.includes('/login') || currentUrl.includes('/i/flow/login')) {
-      throw new Error('Authentication required - redirected to login');
+    // COMPLETELY REWRITTEN ERROR DETECTION LOGIC
+    const pageAnalysis = await page.evaluate((username) => {
+      const analysis = {
+        currentUrl: window.location.href,
+        pageTitle: document.title,
+        bodyText: document.body ? document.body.innerText.toLowerCase() : '',
+        hasLoginForm: false,
+        hasRateLimitMessage: false,
+        hasSuspensionMessage: false,
+        hasProtectedMessage: false,
+        hasNotFoundMessage: false,
+        hasProfileElements: false,
+        hasArticles: false,
+        articleCount: 0,
+        debugInfo: []
+      };
+      
+      // Check for login redirect (most reliable)
+      if (analysis.currentUrl.includes('/login') || analysis.currentUrl.includes('/i/flow/login')) {
+        analysis.hasLoginForm = true;
+        analysis.debugInfo.push('Redirected to login page');
+        return analysis;
+      }
+      
+      // Check for profile elements to see if we're on a profile page
+      const profileIndicators = [
+        '[data-testid="UserName"]',
+        '[data-testid="User-Names"]',
+        '[data-testid="UserDescription"]',
+        '[data-testid="followersCount"]',
+        '[data-testid="followingCount"]'
+      ];
+      
+      analysis.hasProfileElements = profileIndicators.some(selector => document.querySelector(selector));
+      if (analysis.hasProfileElements) {
+        analysis.debugInfo.push('Profile elements detected');
+      }
+      
+      // Check for articles/tweets
+      const articles = document.querySelectorAll('article');
+      analysis.hasArticles = articles.length > 0;
+      analysis.articleCount = articles.length;
+      analysis.debugInfo.push(`Found ${articles.length} article elements`);
+      
+      // VERY SPECIFIC error message detection
+      const bodyText = analysis.bodyText;
+      
+      // Rate limit - look for very specific messages
+      const rateLimitIndicators = [
+        'rate limit exceeded',
+        'too many requests',
+        'try again later'
+      ];
+      analysis.hasRateLimitMessage = rateLimitIndicators.some(indicator => bodyText.includes(indicator));
+      
+      // Suspension - ONLY if explicitly stated
+      const suspensionIndicators = [
+        'this account has been suspended',
+        'account suspended for violating',
+        'permanently suspended'
+      ];
+      analysis.hasSuspensionMessage = suspensionIndicators.some(indicator => bodyText.includes(indicator));
+      
+      // Protected account - specific messages only
+      const protectedIndicators = [
+        'this account\'s tweets are protected',
+        'these tweets are protected',
+        'you\'re not authorized to see these tweets'
+      ];
+      analysis.hasProtectedMessage = protectedIndicators.some(indicator => bodyText.includes(indicator));
+      
+      // Account not found - specific messages only
+      const notFoundIndicators = [
+        'this account doesn\'t exist',
+        'sorry, that page doesn\'t exist',
+        'user not found'
+      ];
+      analysis.hasNotFoundMessage = notFoundIndicators.some(indicator => bodyText.includes(indicator));
+      
+      // Add some key page text for debugging
+      if (bodyText.length > 0) {
+        analysis.debugInfo.push(`Page contains text: ${bodyText.substring(0, 200)}...`);
+      }
+      
+      return analysis;
+    }, cleanUsername);
+    
+    console.log(`🔍 [${scrapeId}] Page analysis:`, {
+      url: pageAnalysis.currentUrl,
+      title: pageAnalysis.pageTitle,
+      hasProfile: pageAnalysis.hasProfileElements,
+      articles: pageAnalysis.articleCount,
+      errors: {
+        login: pageAnalysis.hasLoginForm,
+        rateLimit: pageAnalysis.hasRateLimitMessage,
+        suspended: pageAnalysis.hasSuspensionMessage,
+        protected: pageAnalysis.hasProtectedMessage,
+        notFound: pageAnalysis.hasNotFoundMessage
+      }
+    });
+    
+    // Act on the analysis with MUCH more specific logic
+    if (pageAnalysis.hasLoginForm) {
+      throw new Error('Authentication required - redirected to login page');
     }
     
-    if (pageContent.includes('rate limit') || pageContent.includes('Rate limit exceeded')) {
-      throw new Error('Rate limited by Twitter - try again later');
+    if (pageAnalysis.hasRateLimitMessage) {
+      throw new Error('Rate limited by Twitter - try again in a few minutes');
     }
     
-    if (pageContent.includes('Account suspended') || pageContent.includes('suspended')) {
+    if (pageAnalysis.hasSuspensionMessage) {
       throw new Error(`Account @${cleanUsername} is suspended`);
     }
     
-    if (pageContent.includes('doesn\'t exist') || pageContent.includes('page doesn\'t exist')) {
+    if (pageAnalysis.hasNotFoundMessage) {
       throw new Error(`Account @${cleanUsername} doesn't exist`);
     }
     
-    if (pageContent.includes('Tweets are protected') || pageContent.includes('protected')) {
+    if (pageAnalysis.hasProtectedMessage) {
       throw new Error(`Account @${cleanUsername} is private/protected`);
     }
-
-    // Wait for tweets to load
-    console.log(`⏳ [${scrapeId}] Waiting for tweets to load...`);
     
-    try {
-      await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 });
-      console.log(`✅ [${scrapeId}] Tweets loaded successfully`);
-    } catch (e) {
-      // Try alternative selectors
-      const alternatives = [
-        'article',
-        '[data-testid="tweetText"]',
-        '[data-testid="tweet"]'
-      ];
+    // If we have profile elements, we're good to continue even without articles yet
+    if (!pageAnalysis.hasProfileElements) {
+      console.log(`⚠️ [${scrapeId}] No profile elements found, checking for generic content...`);
       
-      let found = false;
-      for (const selector of alternatives) {
-        try {
-          await page.waitForSelector(selector, { timeout: 5000 });
-          found = true;
-          break;
-        } catch (e) {
-          continue;
-        }
-      }
+      // Final fallback check for any recognizable Twitter content
+      const hasTwitterContent = await page.evaluate(() => {
+        return document.querySelector('[data-testid]') || 
+               document.querySelector('[aria-label]') ||
+               document.body.innerText.toLowerCase().includes('twitter') ||
+               document.body.innerText.toLowerCase().includes('x.com');
+      });
       
-      if (!found) {
-        throw new Error('No tweets found - account may be empty, private, or rate limited');
+      if (!hasTwitterContent) {
+        throw new Error(`Cannot access @${cleanUsername} - unknown page state`);
       }
     }
+    
+    // Try to wait for tweet content with multiple strategies
+    console.log(`⏳ [${scrapeId}] Waiting for tweet content to load...`);
+    
+    let tweetsFound = false;
+    const tweetSelectors = [
+      'article[data-testid="tweet"]',
+      'article',
+      '[data-testid="tweetText"]',
+      'div[data-testid="primaryColumn"] article'
+    ];
+    
+    // Try each selector with reasonable timeout
+    for (const selector of tweetSelectors) {
+      try {
+        await page.waitForSelector(selector, { timeout: 8000 });
+        tweetsFound = true;
+        console.log(`✅ [${scrapeId}] Found content with selector: ${selector}`);
+        break;
+      } catch (e) {
+        console.log(`⏳ [${scrapeId}] Selector ${selector} failed, trying next...`);
+        continue;
+      }
+    }
+    
+    // If no tweets found but we have a valid profile, continue anyway
+    if (!tweetsFound) {
+      console.log(`📭 [${scrapeId}] No tweet elements found, but profile is valid`);
+    }
 
-    // Allow content to settle
+    // Allow more time for dynamic content
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Scroll to top for freshest content
@@ -416,14 +535,19 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
           
           for (const selector of textSelectors) {
             const textElement = article.querySelector(selector);
-            if (textElement && textElement.innerText.trim() && textElement.innerText.length > 3) {
+            if (textElement && textElement.innerText && textElement.innerText.trim().length > 3) {
               tweetText = textElement.innerText.trim();
               break;
             }
           }
           
-          // Skip if no meaningful text content
-          if (!tweetText || tweetText.length < 3) continue;
+          // Skip if no meaningful text content and no media
+          const hasMedia = article.querySelector('img[src*="pbs.twimg.com"]') || 
+                           article.querySelector('video') ||
+                           article.querySelector('[data-testid="gif"]');
+          
+          if (!tweetText && !hasMedia) continue;
+          if (tweetText && tweetText.length < 3) continue;
 
           // Get tweet link and ID
           const linkElement = article.querySelector('a[href*="/status/"]') || 
@@ -463,7 +587,9 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
             }
           }
 
-          if (!timestamp) continue;
+          if (!timestamp) {
+            timestamp = new Date().toISOString(); // Fallback timestamp
+          }
           
           const tweetDate = new Date(timestamp);
           if (isNaN(tweetDate.getTime()) || tweetDate < cutoffDate) continue;
@@ -474,7 +600,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
                             article.querySelector('[data-testid="User-Name"] span') ||
                             article.querySelector('[data-testid="UserName"] span');
           
-          if (nameElement && nameElement.textContent.trim()) {
+          if (nameElement && nameElement.textContent && nameElement.textContent.trim()) {
             displayName = nameElement.textContent.trim();
           }
 
@@ -553,7 +679,7 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
     console.log(`📊 Extracted ${tweets.length} tweets for @${cleanUsername}`);
 
     return {
-      success: true,
+      success: tweets.length > 0,
       username: cleanUsername,
       tweets,
       count: tweets.length,
@@ -562,7 +688,16 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
         scrape_time_ms: totalTime,
         instance_id: browserManager.instanceId
       },
-      scraped_at: new Date().toISOString()
+      scraped_at: new Date().toISOString(),
+      analysis: pageAnalysis, // Include debug info
+      ...(tweets.length === 0 ? {
+        warning: 'No recent tweets found within the specified timeframe',
+        suggestions: [
+          'Try increasing freshnessDays parameter',
+          'Account may have no recent activity',
+          'Try again in a few minutes if rate limited'
+        ]
+      } : {})
     };
 
   } catch (error) {
@@ -579,7 +714,12 @@ async function scrapeSingleAccount(username, maxTweets = 10, freshnessDays = 7) 
         scrape_time_ms: totalTime,
         instance_id: browserManager.instanceId
       },
-      scraped_at: new Date().toISOString()
+      scraped_at: new Date().toISOString(),
+      suggestions: [
+        'Check if Twitter cookies are properly configured',
+        'Try again in a few minutes if rate limited',
+        'Verify the username is correct'
+      ]
     };
   } finally {
     if (page) {
@@ -596,15 +736,15 @@ app.get('/', (req, res) => {
   const stats = browserManager.getStats();
   
   res.json({
-    status: 'Enhanced Single Account Twitter Scraper',
-    version: '2.0.0',
+    status: 'Enhanced Single Account Twitter Scraper v2.1',
+    version: '2.1.0',
     chrome_executable: chromePath || 'default',
     browser_stats: stats,
     cookies_configured: !!process.env.TWITTER_COOKIES,
     timestamp: new Date().toISOString(),
     features: [
-      'Single Account Optimization',
-      'Enhanced Error Detection',
+      'Precise Error Detection',
+      'Debug Analysis',
       'Cookie Support',
       'Rate Limit Protection',
       'Media Detection',
@@ -627,11 +767,8 @@ app.post('/scrape', async (req, res) => {
 
   const result = await scrapeSingleAccount(username, maxTweets, freshnessDays);
   
-  if (result.success) {
-    res.json(result);
-  } else {
-    res.status(500).json(result);
-  }
+  // Always return 200 for successful requests, let client decide based on success field
+  res.json(result);
 });
 
 // Scrape by profile URL
@@ -657,16 +794,7 @@ app.post('/scrape-url', async (req, res) => {
   const username = usernameMatch[1];
   const result = await scrapeSingleAccount(username, maxTweets, freshnessDays);
   
-  // Return appropriate HTTP status based on result
-  if (result.success) {
-    res.json(result);
-  } else if (result.warning) {
-    // Not a hard error, but couldn't get tweets - return 200 with warning
-    res.json(result);
-  } else {
-    // Hard error - return 500
-    res.status(500).json(result);
-  }
+  res.json(result);
 });
 
 // Browser restart endpoint
@@ -713,6 +841,77 @@ app.get('/stats', (req, res) => {
   });
 });
 
+// Debug endpoint to check what page content we're actually getting
+app.post('/debug-page', async (req, res) => {
+  const { username } = req.body;
+  
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+  
+  const scrapeId = crypto.randomBytes(6).toString('hex');
+  const cleanUsername = username.replace('@', '');
+  
+  let page;
+  try {
+    page = await browserManager.createOptimizedPage(scrapeId);
+    
+    const profileURL = `https://x.com/${cleanUsername}`;
+    console.log(`🔍 [DEBUG-${scrapeId}] Navigating to ${profileURL}`);
+    
+    await page.goto(profileURL, { 
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
+    
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    // Get comprehensive page debug info
+    const debugInfo = await page.evaluate(() => {
+      return {
+        url: window.location.href,
+        title: document.title,
+        bodyText: document.body.innerText.substring(0, 1000),
+        selectors: {
+          articles: document.querySelectorAll('article').length,
+          tweetText: document.querySelectorAll('[data-testid="tweetText"]').length,
+          userNames: document.querySelectorAll('[data-testid="User-Names"]').length,
+          userName: document.querySelectorAll('[data-testid="UserName"]').length
+        },
+        firstArticleContent: (() => {
+          const firstArticle = document.querySelector('article');
+          return firstArticle ? firstArticle.innerText.substring(0, 200) : 'No articles found';
+        })(),
+        pageStructure: {
+          hasMainContent: !!document.querySelector('main'),
+          hasPrimaryColumn: !!document.querySelector('[data-testid="primaryColumn"]'),
+          hasUserProfile: !!document.querySelector('[data-testid="User-Names"]'),
+          hasLoginElements: !!document.querySelector('[data-testid="loginButton"]')
+        }
+      };
+    });
+    
+    res.json({
+      success: true,
+      username: cleanUsername,
+      debug_info: debugInfo,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    res.json({
+      success: false,
+      username: cleanUsername,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  } finally {
+    if (page) {
+      await browserManager.closePage(page, scrapeId);
+    }
+  }
+});
+
 // Initialize browser and start server
 async function startServer() {
   try {
@@ -720,7 +919,7 @@ async function startServer() {
     await browserManager.initialize();
     
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`\n🚀 Enhanced Single Account Twitter Scraper running on port ${PORT}`);
+      console.log(`\n🚀 Enhanced Single Account Twitter Scraper v2.1 running on port ${PORT}`);
       console.log(`🔍 Chrome: ${browserManager.findChrome() || 'default'}`);
       console.log(`🍪 Cookies: ${!!process.env.TWITTER_COOKIES ? 'configured' : 'not configured'}`);
       console.log(`🔥 Browser ready with ID: ${browserManager.instanceId}`);
@@ -730,6 +929,7 @@ async function startServer() {
       console.log(`  GET  /stats         - Detailed server stats`);
       console.log(`  POST /scrape        - Scrape by username`);
       console.log(`  POST /scrape-url    - Scrape by profile URL`);
+      console.log(`  POST /debug-page    - Debug page content`);
       console.log(`  POST /restart-browser - Restart browser`);
       
       console.log(`\n📝 Usage Examples:`);
@@ -740,11 +940,17 @@ async function startServer() {
       console.log(`    "freshnessDays": 7`);
       console.log(`  }`);
       
-      console.log(`\n  POST /scrape-url`);
+      console.log(`\n  POST /debug-page`);
       console.log(`  {`);
-      console.log(`    "url": "https://x.com/elonmusk",`);
-      console.log(`    "maxTweets": 15`);
+      console.log(`    "username": "elonmusk"`);
       console.log(`  }`);
+      
+      console.log(`\n🔧 Key Improvements in v2.1:`);
+      console.log(`  ✅ Completely rewritten error detection`);
+      console.log(`  ✅ Added comprehensive page analysis`);
+      console.log(`  ✅ Added debug endpoint for troubleshooting`);
+      console.log(`  ✅ More precise suspension/rate limit detection`);
+      console.log(`  ✅ Better fallback handling for edge cases`);
     });
   } catch (error) {
     console.error('💥 Failed to start server:', error.message);
