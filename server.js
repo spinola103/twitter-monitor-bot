@@ -657,9 +657,14 @@ app.post('/scrape-url', async (req, res) => {
   const username = usernameMatch[1];
   const result = await scrapeSingleAccount(username, maxTweets, freshnessDays);
   
+  // Return appropriate HTTP status based on result
   if (result.success) {
     res.json(result);
+  } else if (result.warning) {
+    // Not a hard error, but couldn't get tweets - return 200 with warning
+    res.json(result);
   } else {
+    // Hard error - return 500
     res.status(500).json(result);
   }
 });
